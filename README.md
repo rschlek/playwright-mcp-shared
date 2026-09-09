@@ -1,6 +1,10 @@
 # Shared Playwright MCP
 
-Shared Playwright MCP is a Windows setup and operations plugin for running one
+The repository remains named `playwright-mcp-shared`; its installable plugin ID
+is `spro-browser` so existing SPRO marketplace workflows keep the same command
+name while consuming this repository directly.
+
+Shared Playwright MCP is a setup and operations plugin for running one
 loopback-only Playwright MCP service that several agent clients can use at the
 same time.
 
@@ -24,14 +28,14 @@ their own current-tab pointers.
 
 ## Included skill
 
-`playwright-mcp-shared:setup` installs, configures, verifies, repairs, or removes
-the shared service. It includes lifecycle scripts and four automated tests for
+`spro-browser:setup` installs, configures, verifies, repairs, or removes
+the shared service. It includes lifecycle scripts and automated tests for
 multi-client behavior, authentication leasing, redacted health checks, and
-profile-canary isolation.
+profile-canary isolation, plus the portable Windows/macOS lifecycle.
 
 ## Requirements
 
-- Windows with PowerShell 5.1 or later
+- Windows with PowerShell 5.1 or later, or macOS preview
 - Chrome
 - Node.js and npm
 - Claude Code, Codex, or another MCP client that supports an HTTP MCP server
