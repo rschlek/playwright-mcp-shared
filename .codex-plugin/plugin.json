@@ -1,0 +1,22 @@
+{
+  "name": "playwright-mcp-shared",
+  "version": "0.1.0",
+  "description": "Set up one loopback-only Playwright MCP service and persistent Chrome profile shared safely by concurrent agent clients.",
+  "author": {
+    "name": "rschlek"
+  },
+  "repository": "https://github.com/rschlek/playwright-mcp-shared",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Shared Playwright MCP",
+    "shortDescription": "Share one persistent Playwright browser safely across agents.",
+    "longDescription": "Installs and manages a loopback-only Playwright MCP service backed by one persistent Chrome profile, with per-client tab ownership, a serialized authentication lease, redacted health probes, and an isolated profile canary.",
+    "developerName": "rschlek",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": "Set up or diagnose the shared Playwright MCP service without exposing credentials or browser-profile contents."
+  }
+}

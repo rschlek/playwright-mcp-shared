@@ -1,0 +1,9 @@
+node_modules/
+package/
+profiles/
+locks/
+logs/
+outputs/
+state/
+*.log
+.env
