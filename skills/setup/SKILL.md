@@ -24,6 +24,7 @@ Reach this end state:
 - Each MCP client claims and retains its own current tab. Other clients' tabs are
   visible but must not be selected or changed.
 - The service starts at Windows logon and restarts after failure.
+- On macOS preview, the service starts through a user LaunchAgent.
 - No credential, cookie, token, extension state, or profile content enters source
   control or agent output.
 
@@ -47,10 +48,27 @@ for a consistent authenticated experience across agents.
 - Shared behavior asset: `assets/shared-browser-guidance.md`.
 - Password-manager choice and service URL are user-provided configuration. This
   plugin does not prescribe, bundle, or automate a credential provider.
+- Portable lifecycle scripts for macOS preview and prior SPRO installations:
+  - `scripts/portable/manage_browser.py`
+  - `scripts/portable/browser_service.py`
+  - `scripts/portable/auth_lease.py`
 
 Chrome cannot open one user-data directory from multiple browser processes. This
 setup avoids that lock by running one browser owner and connecting every MCP
 client to it over loopback HTTP.
+
+## Platform route
+
+- On Windows, use the PowerShell lifecycle in sections 1 through 5.
+- On macOS, run `python3 scripts/portable/manage_browser.py status`, then
+  `python3 scripts/portable/manage_browser.py install` when setup or repair is
+  needed. Use the returned runtime, profile, port, and health state. Do not run
+  the Windows PowerShell installation sections. Continue with client
+  reconciliation, operating-contract installation, and verification in sections
+  6 through 8.
+- The portable manager detects the prior SPRO runtime when it exists and the new
+  canonical runtime does not. It continues managing that directory in place so
+  existing cookies and sign-ins are not copied or discarded.
 
 ## Runtime
 
@@ -82,7 +100,7 @@ them automatically.
 
 ## 1. Preflight
 
-1. Confirm Windows, Chrome, Node/npm, and PowerShell 5.1 or later.
+1. Confirm Chrome and Node/npm. On Windows, also confirm PowerShell 5.1 or later.
 2. Confirm port 8931 is free or owned by the existing managed service.
 3. Check for Chrome, Node, and PowerShell processes using the intended profile.
    Before changing service or profile configuration, stop the managed service with
@@ -158,6 +176,15 @@ winner, protected renewal/release, and clean handoff. The health test uses local
 fixtures to prove caller-supplied probes accept healthy state, reject generic
 identity/access failures, and never expose response content.
 
+Run the portable lifecycle tests:
+
+```bash
+python3 -m unittest discover -s tests -p "test_portable_lifecycle.py"
+```
+
+Require all tests to pass. They preserve the cross-platform SPRO lifecycle and
+legacy runtime migration behavior now owned by this repository.
+
 ## Shared federation model
 
 Every HTTP client receives the same Playwright `BrowserContext` when
@@ -182,6 +209,12 @@ global authentication lease:
 $lease = powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -File "<RUNTIME>/bin/playwright-auth-lease.ps1" `
   -Action Acquire -Owner "<harness>:<workflow>" | ConvertFrom-Json
+```
+
+On macOS preview, use the installed portable lease:
+
+```bash
+python3 "<RUNTIME>/bin/auth_lease.py" acquire --owner "<harness>:<workflow>"
 ```
 
 If it returns exit 75 / `reason: busy`, do not begin authentication. Wait for the

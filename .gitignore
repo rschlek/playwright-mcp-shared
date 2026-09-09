@@ -7,3 +7,5 @@ outputs/
 state/
 *.log
 .env
+__pycache__/
+*.py[cod]
