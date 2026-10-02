@@ -1,0 +1,11 @@
+node_modules/
+package/
+profiles/
+locks/
+logs/
+outputs/
+state/
+*.log
+.env
+__pycache__/
+*.py[cod]
