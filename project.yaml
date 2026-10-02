@@ -1,0 +1,12 @@
+project: playwright-mcp-shared   # required; equals the top-level folder in the projects root
+title: Shared Playwright MCP   # human-readable name
+summary: "A setup and operations plugin (ID spro-browser) that runs one loopback-only Playwright MCP service so several agent clients, such as Claude Code and Codex, can share one persistent browser profile at the same time."   # required
+scope: personal   # from the profile's scope list, or none once decided
+visibility: public     # anyone can read this repo
+tracking:              # map of system -> reference
+memory:                # tag, state_model, instance, bank as applicable
+links:                 # sources, outputs, docs, people
+# repo_role:           # only in a multi-repo project: parent, or this repo's role
+# repos:               # only in a multi-repo project: role -> remote URL
+# parked:              # only when deliberately parked: since (date) and reason
+# archived:            # same shape as parked
