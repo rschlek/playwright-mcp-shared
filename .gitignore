@@ -9,3 +9,4 @@ state/
 .env
 __pycache__/
 *.py[cod]
+.claude/worktrees/
