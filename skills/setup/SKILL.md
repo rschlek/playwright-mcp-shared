@@ -154,8 +154,9 @@ node <SKILL_DIR>/tests/test-playwright-mcp-shared.mjs
 ```
 
 Require its PASS result. It proves two HTTP clients share a cookie, retain
-distinct current tabs after the claim handshake, and survive an independent
-client disconnect.
+distinct current tabs after the claim handshake, leave no blank tab behind when
+claiming, close only their own tab, and survive an independent client
+disconnect.
 
 Run the isolated profile-canary test:
 
@@ -508,9 +509,11 @@ plugin or the Claude-in-Chrome extension as a browser surface) and ask the human
 to reconcile it; do not silently rewrite their content.
 
 The essential runtime rule is serialized tab claiming: a new client creates a new
-tab and immediately anchors it with its first navigation before another new client
-claims a tab. Afterward, each client retains an independent current-tab pointer
-while sharing profile state.
+tab and anchors it with its first navigation in the same `browser_tabs` call
+(action `new` with `url`) before another new client claims a tab. Afterward, each
+client retains an independent current-tab pointer while sharing profile state.
+A client closes its own tab when its browser work is finished; the blank tab the
+browser opens at launch stays open and keeps the browser running.
 
 ## 8. Verification
 
@@ -525,6 +528,8 @@ while sharing profile state.
    - set or observe shared login state in one;
    - confirm the other sees it;
    - navigate both concurrently and confirm snapshots remain on their own pages;
+   - confirm the claims added no blank tab to the tab list;
+   - let one close its own tab and confirm the other's tab is untouched;
    - disconnect one and confirm the other still works.
 6. Confirm Chrome uses the selected profile and is not launched with
    `--disable-extensions`.

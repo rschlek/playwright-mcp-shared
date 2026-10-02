@@ -143,6 +143,14 @@ function resultText(result) {
     .join("\n");
 }
 
+async function listTabs(client) {
+  return resultText(await client.callTool("browser_tabs", { action: "list" }));
+}
+
+function blankTabCount(tabList) {
+  return (tabList.match(/\(about:blank\)/g) || []).length;
+}
+
 function runLease(args) {
   const result = spawnSync(
     "powershell.exe",
@@ -334,15 +342,25 @@ try {
     await Promise.all([clientA.initialize(), clientB.initialize()]);
 
     // A shared BrowserContext exposes the same first page to every new client.
-    // Each client must claim a new tab before its first navigation.
-    await clientA.callTool("browser_tabs", { action: "new" });
-    await clientA.callTool("browser_navigate", {
+    // Each client must claim a new tab before its first navigation. Creating
+    // and navigating the tab in one call leaves no blank tab behind.
+    const blankBefore = blankTabCount(await listTabs(clientA));
+    await clientA.callTool("browser_tabs", {
+      action: "new",
       url: `http://127.0.0.1:${appPort}/a`,
     });
-    await clientB.callTool("browser_tabs", { action: "new" });
-    await clientB.callTool("browser_navigate", {
+    await clientB.callTool("browser_tabs", {
+      action: "new",
       url: `http://127.0.0.1:${appPort}/b`,
     });
+    const claimedTabs = await listTabs(clientB);
+    if (
+      !claimedTabs.includes(`http://127.0.0.1:${appPort}/a`) ||
+      !claimedTabs.includes(`http://127.0.0.1:${appPort}/b`)
+    )
+      throw new Error(`One-call tab claims did not navigate. Tabs=${claimedTabs}`);
+    if (blankTabCount(claimedTabs) !== blankBefore)
+      throw new Error(`Tab claims left a blank tab behind. Tabs=${claimedTabs}`);
 
     await clientA.callTool("browser_navigate", {
       url: `http://127.0.0.1:${appPort}/set`,
@@ -439,6 +457,22 @@ try {
     )
       throw new Error(`Client B tab ownership failed. A=${textA} B=${textB}`);
 
+    // A finished client closes its own tab. The other client's tab, the
+    // browser's launch tab, and the browser itself must survive.
+    await clientA.callTool("browser_tabs", { action: "close" });
+    let closedTabs = "";
+    for (let attempt = 1; attempt <= 20; attempt++) {
+      closedTabs = await listTabs(clientB);
+      if (!closedTabs.includes(`http://127.0.0.1:${appPort}/a`)) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (closedTabs.includes(`http://127.0.0.1:${appPort}/a`))
+      throw new Error(`Client A's closed tab is still open. Tabs=${closedTabs}`);
+    if (!closedTabs.includes(`http://127.0.0.1:${appPort}/b`))
+      throw new Error(`Closing Client A's tab removed Client B's tab. Tabs=${closedTabs}`);
+    if (blankTabCount(closedTabs) !== blankBefore)
+      throw new Error(`Closing Client A's tab changed the blank tabs. Tabs=${closedTabs}`);
+
     await clientA.close();
     const survivor = resultText(await clientB.callTool("browser_snapshot"));
     if (!survivor.includes("CLIENT_B"))
@@ -451,7 +485,7 @@ try {
       url: `http://127.0.0.1:${appPort}/idp/clear`,
     });
     console.log(
-      "PASS: Two HTTP MCP clients shared state, retained distinct tabs, reproduced a generic federated-identity mismatch, serialized account selection, and survived disconnect.",
+      "PASS: Two HTTP MCP clients shared state, claimed distinct tabs without leaving a blank tab, reproduced a generic federated-identity mismatch, serialized account selection, closed only their own tab, and survived disconnect.",
     );
   } finally {
     await Promise.all([clientA.close(), clientB.close()]);
