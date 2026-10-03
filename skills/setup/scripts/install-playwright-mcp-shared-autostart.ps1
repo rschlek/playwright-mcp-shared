@@ -6,7 +6,9 @@ param(
     [switch]$Start,
     [string]$TaskName = "PlaywrightMCPSharedService",
     [string]$RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-    [string]$RunValueName = "PlaywrightMCPShared"
+    [string]$RunValueName = "PlaywrightMCPShared",
+    [ValidateRange(1, 1440)]
+    [int]$RelaunchIntervalMinutes = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,10 +86,21 @@ function Resolve-TaskVisiblePath {
 }
 
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
-    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        throw "LOCALAPPDATA is unavailable."
+    $InstalledRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+    if (-not [string]::IsNullOrWhiteSpace($env:PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT)) {
+        $RuntimeRoot = $env:PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT
     }
-    $RuntimeRoot = Join-Path $env:LOCALAPPDATA "playwright-mcp-shared"
+    elseif ((Split-Path -Leaf $PSScriptRoot) -eq "bin" -and
+        [IO.File]::Exists((Join-Path $InstalledRoot "state\windows-service-config.json"))) {
+        # An installed copy manages the runtime it lives in.
+        $RuntimeRoot = $InstalledRoot
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $RuntimeRoot = Join-Path $env:LOCALAPPDATA "playwright-mcp-shared"
+    }
+    else {
+        throw "LOCALAPPDATA is unavailable and PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT is not set."
+    }
 }
 $RuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot)
 
@@ -137,7 +150,7 @@ $ServiceConfig = [ordered]@{
     [Text.UTF8Encoding]::new($false)
 )
 
-$ArgumentList = @(
+$PowerShellArguments = @(
     "-NoLogo",
     "-NoProfile",
     "-NonInteractive",
@@ -146,11 +159,38 @@ $ArgumentList = @(
     "-File", ('"{0}"' -f $ServiceScript)
 ) -join " "
 
+# When Windows Terminal is the default console host, -WindowStyle Hidden does
+# not hide the console: a terminal window opens for the service's lifetime, and
+# closing it kills the supervisor. A headless console host never creates a
+# window and keeps the task running in the interactive session.
+$ConsoleHostPath = ""
+if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+    $ConsoleHostPath = Join-Path $env:SystemRoot "System32\conhost.exe"
+}
+if (-not [string]::IsNullOrWhiteSpace($ConsoleHostPath) -and [IO.File]::Exists($ConsoleHostPath)) {
+    $TaskExecute = $ConsoleHostPath
+    $TaskArguments = '--headless "{0}" {1}' -f $PowerShellPath, $PowerShellArguments
+}
+else {
+    $TaskExecute = $PowerShellPath
+    $TaskArguments = $PowerShellArguments
+}
+
 $UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $Action = New-ScheduledTaskAction `
-    -Execute $PowerShellPath `
-    -Argument $ArgumentList
-$Trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserId
+    -Execute $TaskExecute `
+    -Argument $TaskArguments
+# Logon starts the service. The repeating trigger relaunches the wrapper so a
+# supervisor that died is replaced; while one is alive the task instance is
+# still running and IgnoreNew skips the tick, and a launch outside the task
+# finds the singleton lock held and exits quietly.
+$Triggers = @(
+    (New-ScheduledTaskTrigger -AtLogOn -User $UserId),
+    (New-ScheduledTaskTrigger `
+        -Once `
+        -At ([DateTime]::Now.AddMinutes($RelaunchIntervalMinutes)) `
+        -RepetitionInterval (New-TimeSpan -Minutes $RelaunchIntervalMinutes))
+)
 $Principal = New-ScheduledTaskPrincipal `
     -UserId $UserId `
     -LogonType Interactive `
@@ -167,7 +207,7 @@ $Settings = New-ScheduledTaskSettingsSet `
 $null = Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $Action `
-    -Trigger $Trigger `
+    -Trigger $Triggers `
     -Principal $Principal `
     -Settings $Settings `
     -Description "Owns the loopback-only shared Playwright MCP service; performs no scheduled browsing." `
@@ -181,6 +221,12 @@ if (Test-Path -LiteralPath $RunKey) {
         -ErrorAction SilentlyContinue
 }
 
+# Registering the task is the intent to run it again after a managed stop.
+$StoppedMarkerPath = Join-Path $StateRoot "service-stopped"
+if ([IO.File]::Exists($StoppedMarkerPath)) {
+    [IO.File]::Delete($StoppedMarkerPath)
+}
+
 if ($Start) {
     Start-ScheduledTask -TaskName $TaskName
 }
@@ -190,6 +236,8 @@ if ($Start) {
     UserId = $UserId
     RuntimeRoot = $RuntimeRoot
     PowerShellPath = $PowerShellPath
+    TaskExecute = $TaskExecute
+    TaskArguments = $TaskArguments
     NodePath = $NodePath
     ProfilePath = $ProfilePath
     Port = $Port

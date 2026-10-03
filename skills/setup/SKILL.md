@@ -23,7 +23,8 @@ Reach this end state:
   sessions, optional extensions, passkeys, and remembered site state.
 - Each MCP client claims and retains its own current tab. Other clients' tabs are
   visible but must not be selected or changed.
-- The service starts at Windows logon and restarts after failure.
+- The service starts at Windows logon without a console window, restarts its
+  Node.js process after failure, and is relaunched if its supervisor dies.
 - On macOS preview, the service starts through a user LaunchAgent.
 - No credential, cookie, token, extension state, or profile content enters source
   control or agent output.
@@ -89,8 +90,10 @@ client to it over loopback HTTP.
   outputs\shared\
   logs\shared-server.stdout.log
   logs\shared-server.stderr.log
+  state\windows-service-config.json
   state\shared-server.pid
   state\shared-node.pid
+  state\service-stopped   (present only after a managed stop)
 ```
 
 The selected shared profile may instead be an existing automation profile path
@@ -196,9 +199,16 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 ```
 
 Require its PASS results. It proves autostart registers a supervised current-user
-service task with stable PowerShell and Node.js paths, removes the legacy Run
-entry, recovers from a stale Node.js path, and restarts an unexpectedly exited
-child.
+service task with stable PowerShell and Node.js paths, a headless console host,
+and a repeating relaunch trigger; removes the legacy Run entry; recovers from a
+stale Node.js path; restarts an unexpectedly exited child; refuses a port held
+by an unidentified process; and, through a disposable task on a free port, shows
+that no terminal window appears, that a killed supervisor is replaced by one
+that adopts the running Node.js process, that a second launch exits quietly,
+and that the stop script stops a task-launched supervisor but never an
+unrelated process. The live checks run the pinned CLI headless in a temporary
+runtime; pass `-McpCli <path>` or set `PLAYWRIGHT_MCP_SHARED_CLI` when the
+canonical runtime does not hold it. Without a CLI they report SKIP.
 
 ## Shared federation model
 
@@ -327,8 +337,9 @@ the wrong remembered identity. It is intentionally human-controlled:
    automate credentials, multifactor prompts, password-manager sign-in/unlock,
    or passkeys.
 5. Ask the human to close Chrome normally, verify no process owns the profile,
-   restart the managed service through the installed autostart script, and
-   verify the loopback listener and logs.
+   restart the managed service by re-running the installed autostart script
+   with `-Start` (which also clears the managed-stop hold), and verify the
+   loopback listener and logs.
 6. In a newly claimed shared tab, retest the original relying-party entry point
    and then the separate application. A relying-party success plus continued application
    `access-denied` is evidence for an application-principal problem, not a reason
@@ -423,9 +434,12 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 Verify:
 
 - the `PlaywrightMCPSharedService` current-user scheduled task exists, starts at
-  interactive logon, and has a failure-restart policy;
-- the task action points at the installed service wrapper through the stable
-  system Windows PowerShell executable, not a caller-specific runtime;
+  interactive logon, has a second trigger that repeats every five minutes
+  indefinitely, ignores a new instance while one runs, and has a
+  failure-restart policy;
+- the task action runs `%SystemRoot%\System32\conhost.exe --headless` with the
+  stable system Windows PowerShell executable and the installed service wrapper,
+  not a caller-specific runtime;
 - the wrapper reads the selected runtime, profile, port, and resolved absolute
   Node.js executable from `state/windows-service-config.json`, so Task Scheduler
   receives only a short, reliable command line and logon startup
@@ -434,19 +448,59 @@ Verify:
   Codex runtime;
 - the legacy `PlaywrightMCPShared` Run value is absent after successful task
   registration;
-- it is running;
+- the task reports `Running`, no terminal window is open for it, and
+  `state/shared-server.pid` names a live `powershell.exe` whose command line
+  names the installed service wrapper;
 - only `127.0.0.1:8931` is listening;
-- the owning process belongs to the managed Playwright command;
+- the owning process is the PID in `state/shared-node.pid` and belongs to the
+  managed Playwright command;
 - the stderr log contains the expected localhost listening message and no startup
   failure.
 
 The Windows Task Scheduler owns the launcher independently of Codex and Claude;
-the task performs no scheduled browsing. The launcher supervises the Playwright
-MCP Node.js process. If that child exits unexpectedly, it restarts it after a
-short bounded delay. The managed stop script terminates the launcher first, so
-an intentional stop does not trigger a child restart. When `-Start` is requested,
-the installer starts the registered service task rather than creating a client-
-owned child process.
+the task performs no scheduled browsing. The task's PowerShell process is the
+supervisor: it supervises the Playwright MCP Node.js process and, if that child
+exits unexpectedly, restarts it after a short bounded delay.
+
+When Windows Terminal is the default console host, `-WindowStyle Hidden` is not
+honoured and a console window stays open for the service's lifetime; closing it
+kills the supervisor while Node.js keeps running. The task therefore starts
+PowerShell under a headless console host, which creates no window and keeps
+the task in the interactive session, so Chrome stays visible for sign-ins and
+the task reports `Running` while the supervisor lives. If the supervisor still
+dies, the task instance ends and the repeating trigger relaunches it within
+five minutes. A launch that finds a live supervisor holding the singleton lock
+exits 0 without logging or touching state.
+
+A new supervisor adopts a Node.js process that outlived the previous one: when
+the loopback port is owned by `node.exe` running this runtime's MCP CLI with
+the configured profile and port, it records its own PID, waits on that process,
+and resumes the normal restart loop when it exits. A port held by anything else
+fails startup with a message naming the owner. A launcher removes only PID files
+that still hold its own values.
+
+The managed stop script recognises both a task-launched supervisor (the service
+wrapper) and a directly launched one (the launcher), validates each PID's
+process name and command line before stopping it, and never stops a process
+that does not match; it discards that stale PID file instead. It stops the
+supervisor first, so an intentional stop does not trigger a child restart, and
+writes `state/service-stopped` so the repeating trigger does not relaunch the
+service. Re-running the installer clears that hold; a reboot also clears it so
+logon autostart still works. Run without `-RuntimeRoot`, the installed copy
+manages the runtime it lives in, and the port comes from the service
+configuration.
+
+When `-Start` is requested, the installer starts the registered service task
+rather than creating a client-owned child process.
+
+To bring an existing installation up to this behaviour, copy the updated
+scripts into the runtime `bin` directory as in section 3 and re-run the
+installer with `-Start`. No service restart is needed. If the previous
+supervisor already died, the new supervisor adopts the running Node.js process
+and its PID does not change. If it is still alive, the new launch exits quietly
+and the old supervisor keeps running in its old form; closing its console
+window is then safe, because the relaunch trigger starts a headless supervisor
+that adopts the same Node.js process.
 
 When setup runs inside packaged Codex Desktop, Windows redirects writable
 `LocalAppData` files into the app package's `LocalCache`. The installer detects
@@ -456,7 +510,8 @@ existing shared profile while ensuring the out-of-package scheduled task can see
 the launcher and pinned Playwright package.
 
 Use `stop-playwright-mcp-shared.ps1` for upgrades or profile changes. It validates
-managed PIDs before stopping anything.
+managed PIDs before stopping anything. Afterwards the service stays down until
+the installer runs again (or the machine reboots).
 
 ## 6. Reconcile both clients
 
