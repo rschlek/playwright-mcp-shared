@@ -1,6 +1,6 @@
 {
   "name": "spro-browser",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Set up one loopback-only Playwright MCP service and persistent Chrome profile shared safely by concurrent agent clients.",
   "author": {
     "name": "rschlek"
