@@ -322,6 +322,11 @@ try {
       // disposable smoke runtime must exit after its child is stopped.
       "-MaxRestarts",
       "0",
+      // The launch-tab dashboard is covered by
+      // test-playwright-mcp-dashboard-live.mjs; keep this test's tab counts
+      // independent of it.
+      "-DashboardPort",
+      "0",
     ],
     {
       env: process.env,

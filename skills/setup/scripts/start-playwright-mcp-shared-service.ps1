@@ -36,6 +36,13 @@ if (-not [string]::IsNullOrWhiteSpace([string]$Config.McpCli)) {
 if ($Config.Headless -eq $true) {
     $LauncherArguments.Headless = $true
 }
+# Dashboard settings; an older configuration without them keeps the defaults.
+if ($null -ne $Config.DashboardPort) {
+    $LauncherArguments.DashboardPort = [int]$Config.DashboardPort
+}
+if (-not [string]::IsNullOrWhiteSpace([string]$Config.DashboardAttach)) {
+    $LauncherArguments.DashboardAttach = [string]$Config.DashboardAttach
+}
 
 & $LauncherPath @LauncherArguments
 exit $LASTEXITCODE

@@ -3,6 +3,9 @@ param(
     [string]$ProfilePath = "",
     [string]$NodePath = "",
     [int]$Port = 8931,
+    # Loopback port of the live dashboard shown in the launch tab; 0 turns it off.
+    [ValidateRange(0, 65535)]
+    [int]$DashboardPort = 8932,
     [switch]$Start,
     [string]$TaskName = "PlaywrightMCPSharedService",
     [string]$RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -135,6 +138,10 @@ $PowerShellPath = [IO.Path]::GetFullPath($WindowsPowerShellPath)
 
 $NodePath = Resolve-NodeExecutable -PreferredPath $NodePath
 
+if ($DashboardPort -ne 0 -and ($DashboardPort -lt 1024 -or $DashboardPort -eq $Port)) {
+    throw "The dashboard port must be 0 (off) or a port between 1024 and 65535 other than the service port."
+}
+
 $StateRoot = Join-Path $RuntimeRoot "state"
 $null = [IO.Directory]::CreateDirectory($StateRoot)
 $ServiceConfigPath = Join-Path $StateRoot "windows-service-config.json"
@@ -143,6 +150,7 @@ $ServiceConfig = [ordered]@{
     ProfilePath = $ProfilePath
     NodePath = $NodePath
     Port = $Port
+    DashboardPort = $DashboardPort
 } | ConvertTo-Json
 [IO.File]::WriteAllText(
     $ServiceConfigPath,
@@ -241,6 +249,7 @@ if ($Start) {
     NodePath = $NodePath
     ProfilePath = $ProfilePath
     Port = $Port
+    DashboardPort = $DashboardPort
     ServiceConfigPath = $ServiceConfigPath
     Started = [bool]$Start
 }
