@@ -13,6 +13,7 @@ $Installer = Join-Path $SkillRoot "scripts\install-playwright-mcp-shared-autosta
 $Launcher = Join-Path $SkillRoot "scripts\playwright-mcp-shared.ps1"
 $ServiceWrapper = Join-Path $SkillRoot "scripts\start-playwright-mcp-shared-service.ps1"
 $StopScript = Join-Path $SkillRoot "scripts\stop-playwright-mcp-shared.ps1"
+$DashboardScript = Join-Path $SkillRoot "scripts\playwright-mcp-dashboard.mjs"
 $TestId = [Guid]::NewGuid().ToString("N")
 $RuntimeRoot = Join-Path ([IO.Path]::GetTempPath()) "playwright-mcp-shared-test-$TestId"
 $RunKey = "HKCU:\Software\PlaywrightMCPSharedTests\$TestId"
@@ -112,6 +113,20 @@ function Test-Alive {
     return $ProcessId -gt 0 -and [bool](Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
+function Test-Dashboard {
+    param([int]$TargetPort)
+    try {
+        $Request = [Net.HttpWebRequest]::Create("http://127.0.0.1:$TargetPort/healthz")
+        $Request.Timeout = 2000
+        $Response = $Request.GetResponse()
+        $Response.Dispose()
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-TaskState {
     return [string](Get-ScheduledTask -TaskName $TaskName).State
 }
@@ -201,6 +216,9 @@ try {
     }
     if ($ServiceConfig.ProfilePath -ne $Result.ProfilePath) {
         throw "Service configuration does not retain the selected profile."
+    }
+    if ($ServiceConfig.DashboardPort -ne 8932) {
+        throw "Service configuration does not record the default dashboard port."
     }
     $Triggers = @($Task.Triggers)
     if (-not ($Triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskLogonTrigger" })) {
@@ -305,9 +323,13 @@ try {
         return
     }
 
-    # Run the real CLI headless in the temporary runtime through the task.
+    # Run the real CLI headless in the temporary runtime through the task,
+    # with the launch-tab dashboard on a free port.
+    Copy-Item -LiteralPath $DashboardScript -Destination (Join-Path $BinRoot "playwright-mcp-dashboard.mjs")
+    $DashboardPort = Get-FreePort
     $ServiceConfig | Add-Member -NotePropertyName McpCli -NotePropertyValue ([IO.Path]::GetFullPath($McpCli)) -Force
     $ServiceConfig | Add-Member -NotePropertyName Headless -NotePropertyValue $true -Force
+    $ServiceConfig | Add-Member -NotePropertyName DashboardPort -NotePropertyValue $DashboardPort -Force
     [IO.File]::WriteAllText(
         $Result.ServiceConfigPath,
         ($ServiceConfig | ConvertTo-Json),
@@ -353,6 +375,16 @@ try {
 
     "PASS Task-launched supervisor runs under a headless console host with no terminal window, and the task reports Running."
 
+    Wait-Until { Test-Dashboard -TargetPort $DashboardPort } 30 "The supervisor did not start the dashboard."
+    $DashboardPid = Read-PidFile "dashboard.pid"
+    $Dashboard = Get-CimInstance Win32_Process -Filter "ProcessId=$DashboardPid"
+    if (-not $Dashboard -or $Dashboard.Name -ne "node.exe" -or
+        -not $Dashboard.CommandLine.Contains((Join-Path $BinRoot "playwright-mcp-dashboard.mjs"))) {
+        throw "The dashboard PID does not belong to the installed dashboard script."
+    }
+
+    "PASS Task-launched supervisor starts the launch-tab dashboard on its configured loopback port."
+
     # Kill the supervisor: the task instance ends, the node keeps serving, and a
     # relaunch adopts that node instead of failing on the port.
     $AdoptionsBefore = Get-AdoptionCount
@@ -375,6 +407,12 @@ try {
     }
     if ((Get-TaskState) -ne "Running") {
         throw "Task does not report Running under the adopting supervisor."
+    }
+    Wait-Until {
+        @(Get-Content -LiteralPath (Join-Path $RuntimeRoot "logs\shared-server.bootstrap.log") | Where-Object { $_ -match "dashboard process adopted$" }).Count -gt 0
+    } 30 "Relaunched supervisor did not adopt the running dashboard."
+    if ((Read-PidFile "dashboard.pid") -ne $DashboardPid -or -not (Test-Dashboard -TargetPort $DashboardPort)) {
+        throw "Relaunch restarted the dashboard instead of adopting it."
     }
 
     "PASS Killed supervisor is replaced by a relaunch that adopts the running node (PID unchanged) and records correct PID files."
@@ -420,7 +458,21 @@ try {
     }
     $NodePid = Read-PidFile "shared-node.pid"
 
+    if ((Read-PidFile "dashboard.pid") -ne $DashboardPid) {
+        throw "A node restart restarted the dashboard."
+    }
+
     "PASS Adopting supervisor restarts a killed node and the endpoint answers again."
+
+    # The dashboard is supervised too: a killed dashboard comes back.
+    Stop-Process -Id $DashboardPid -Force
+    Wait-Until {
+        $Current = Read-PidFile "dashboard.pid"
+        $Current -gt 0 -and $Current -ne $DashboardPid -and (Test-Dashboard -TargetPort $DashboardPort)
+    } 60 "Supervisor did not restart the killed dashboard."
+    $DashboardPid = Read-PidFile "dashboard.pid"
+
+    "PASS Supervisor restarts a killed dashboard."
 
     # The installed stop script resolves its own runtime and port, stops the
     # task-launched supervisor and node, and holds the service down.
@@ -437,9 +489,10 @@ try {
             $AdoptingPid, (Test-Alive $AdoptingPid), $NodePid, (Test-Alive $NodePid),
             (Get-Content -LiteralPath (Join-Path $RuntimeRoot "stop.stdout.log") -Raw))
     }
-    if ((Read-PidFile "shared-server.pid") -ne 0 -or (Read-PidFile "shared-node.pid") -ne 0) {
+    if ((Read-PidFile "shared-server.pid") -ne 0 -or (Read-PidFile "shared-node.pid") -ne 0 -or (Read-PidFile "dashboard.pid") -ne 0) {
         throw "Managed stop left PID files behind."
     }
+    Wait-Until { -not (Test-Alive $DashboardPid) } 15 "Managed stop left the dashboard running."
     Wait-Until { (Get-TaskState) -ne "Running" } 15 "Task still reports Running after the managed stop."
     $LastRunBefore = (Get-ScheduledTaskInfo -TaskName $TaskName).LastRunTime
     Start-ScheduledTask -TaskName $TaskName
