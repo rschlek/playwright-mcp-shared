@@ -30,25 +30,43 @@ do not loop login or clear state speculatively.
    first. This serialized claim prevents clients from attaching to the same
    initial page. If the call reports an error, the new tab still exists and is
    current: navigate it with `browser_navigate` or close it; never open another.
+   Then register the claim so the dashboard shows it: run the installed
+   `playwright-tab-claim.ps1` with `-Action Claim -Owner "<harness>:<workflow>"
+   -Task "<short label>" -Url "<the URL just opened>"` (portable runtimes:
+   `tab_claim.py claim --owner ... --task ... --url ...`) and keep the
+   returned `claim_id`. A claim is a label, not a lock; if the helper is
+   unavailable, carry on without it.
 2. After claiming, treat the current tab as owned by this session. Other agents'
    tabs remain visible in tab lists; never select, navigate, or close them. That
-   includes the blank tab the browser opens at launch: leave it open, it keeps
-   the browser running after sessions close their own tabs. Agents that share
-   one MCP connection, such as a session and the subagents it spawns, share one
-   current tab: they take turns on that one claimed tab and do not each claim
-   another.
-3. Never call `browser_close` during ordinary work. When this session's browser
+   includes the first tab, the browser's launch tab, which shows the live
+   dashboard titled "Shared browser - launch tab": never select, navigate, or
+   close it. It keeps the browser running after sessions close their own tabs
+   and shows which agent is using which tab. Agents that share one MCP
+   connection, such as a session and the subagents it spawns, share one current
+   tab: they take turns on that one claimed tab and do not each claim another.
+3. A session's current tab is not durable. After a reconnect, a tool error, or
+   a long idle gap, the session can land back on the first tab, the dashboard.
+   Before navigating after any such gap, list tabs and confirm the tab marked
+   current is the one this session claimed. If the dashboard is current, select
+   this session's own tab by its index (identify it by its URL) or claim a new
+   one; never navigate while the dashboard is current. The dashboard restores
+   itself when an unclaimed launch tab is navigated away, so work done there is
+   lost.
+4. Never call `browser_close` during ordinary work. When this session's browser
    work is finished, close its own tab so tabs do not pile up: list tabs, confirm
    the tab marked current is the one this session claimed, then call
-   `browser_tabs` with action `close` and no index. Close only this session's
-   tab, only when its identity is certain, and never the only remaining tab -
-   that shuts the browser down for every client. After closing, this session
-   owns no tab and the current-tab pointer falls to another agent's tab: claim
-   again as in rule 1 before any further browser call.
-4. Never log out, clear cookies or storage, or change shared authentication unless
+   `browser_tabs` with action `close` and no index, and release the claim with
+   `-Action Release -ClaimId <claim_id>`. Close only this session's tab, only
+   when its identity is certain, and never the only remaining tab - that shuts
+   the browser down for every client. After closing, this session owns no tab
+   and the current-tab pointer falls to another agent's tab: claim again as in
+   rule 1 before any further browser call. A claim follows its tab across
+   navigation and expires after an hour; for longer work, renew it with
+   `-Action Renew -ClaimId <claim_id>`.
+5. Never log out, clear cookies or storage, or change shared authentication unless
    the user explicitly requests it. Such changes affect every agent.
-5. If tab ownership is uncertain, stop and list tabs rather than guessing.
-6. Tab ownership does not serialize authentication. Only one client may mutate
+6. If tab ownership is uncertain, stop and list tabs rather than guessing.
+7. Tab ownership does not serialize authentication. Only one client may mutate
    shared authentication state at a time; other clients wait until that flow has
    reached a verified success or failure boundary. Acquire the installed
    `playwright-auth-lease.ps1` before sign-in, sign-out, account selection,
