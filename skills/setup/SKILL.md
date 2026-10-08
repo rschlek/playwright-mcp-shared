@@ -21,8 +21,12 @@ Reach this end state:
   `--shared-browser-context`.
 - Every Claude Code and Codex instance sees the same cookies, single sign-on
   sessions, optional extensions, passkeys, and remembered site state.
-- Each MCP client claims and retains its own current tab. Other clients' tabs are
-  visible but must not be selected or changed.
+- Each MCP client claims and retains its own current tab, and records the claim
+  in a shared registry. Other clients' tabs are visible but must not be selected
+  or changed.
+- The browser's launch tab shows a live dashboard at `http://127.0.0.1:8932/`
+  instead of a blank page: every open tab with the agent that claimed it, the
+  sign-in lease, and service status.
 - The service starts at Windows logon without a console window, restarts its
   Node.js process after failure, and is relaunched if its supervisor dies.
 - On macOS preview, the service starts through a user LaunchAgent.
@@ -36,6 +40,7 @@ for a consistent authenticated experience across agents.
 
 - Package: `@playwright/mcp@0.0.79`.
 - Endpoint: `http://localhost:8931/mcp`.
+- Launch-tab dashboard: `http://127.0.0.1:8932/` (JSON at `/api/state`).
 - Bind address: `127.0.0.1`.
 - Current-user scheduled task: `PlaywrightMCPSharedService`.
 - Legacy current-user Run value removed during migration: `PlaywrightMCPShared`.
@@ -45,6 +50,8 @@ for a consistent authenticated experience across agents.
   - `scripts/install-playwright-mcp-shared-autostart.ps1`
   - `scripts/stop-playwright-mcp-shared.ps1`
   - `scripts/playwright-auth-lease.ps1`
+  - `scripts/playwright-tab-claim.ps1`
+  - `scripts/playwright-mcp-dashboard.mjs`
   - `scripts/playwright-auth-health.mjs`
   - `scripts/playwright-profile-canary.mjs` (isolated diagnostics only; never
     copied over the managed service)
@@ -55,6 +62,7 @@ for a consistent authenticated experience across agents.
   - `scripts/portable/manage_browser.py`
   - `scripts/portable/browser_service.py`
   - `scripts/portable/auth_lease.py`
+  - `scripts/portable/tab_claim.py`
 
 Chrome cannot open one user-data directory from multiple browser processes. This
 setup avoids that lock by running one browser owner and connecting every MCP
@@ -82,17 +90,24 @@ client to it over loopback HTTP.
   bin\install-playwright-mcp-shared-autostart.ps1
   bin\stop-playwright-mcp-shared.ps1
   bin\playwright-auth-lease.ps1
+  bin\playwright-tab-claim.ps1
+  bin\playwright-mcp-dashboard.mjs
   bin\playwright-auth-health.mjs
   package\node_modules\@playwright\mcp\cli.js
   profiles\shared\
   locks\shared-server.lock
   locks\auth-flow.json
+  locks\tab-claims.json
   outputs\shared\
   logs\shared-server.stdout.log
   logs\shared-server.stderr.log
+  logs\dashboard.stdout.log
+  logs\dashboard.stderr.log
   state\windows-service-config.json
   state\shared-server.pid
   state\shared-node.pid
+  state\dashboard.pid
+  state\dashboard-session.json
   state\service-stopped   (present only after a managed stop)
 ```
 
@@ -133,7 +148,8 @@ Every client will share whichever path is selected.
 
 ## 3. Install server resources
 
-Copy the four server-management scripts plus `playwright-auth-lease.ps1` and
+Copy the four server-management scripts plus `playwright-auth-lease.ps1`,
+`playwright-tab-claim.ps1`, `playwright-mcp-dashboard.mjs`, and
 `playwright-auth-health.mjs` into the runtime `bin` directory. They are managed
 files: back up a differing installed copy, write UTF-8 without a BOM, re-read and
 require byte equality with the bundled source, then remove the backup. Restore
@@ -183,6 +199,27 @@ winner, protected renewal/release, and clean handoff. The health test uses local
 fixtures to prove caller-supplied probes accept healthy state, reject generic
 identity/access failures, and never expose response content.
 
+Run the tab-claim and dashboard tests:
+
+```powershell
+node <SKILL_DIR>/tests/test-playwright-tab-claim.mjs
+node <SKILL_DIR>/tests/test-playwright-mcp-dashboard.mjs
+node <SKILL_DIR>/tests/test-playwright-mcp-dashboard-live.mjs
+```
+
+Require their PASS results. The claim test races eight claimants and requires
+every claim to land, then checks renewal, release, expiry pruning, URL
+redaction, and input validation. The dashboard test drives the dashboard
+against a scripted MCP service: it attaches only while a browser owns the
+profile, takes the blank launch tab without opening another, joins claims to
+the right tabs across navigation, expiry, and release, restores an unclaimed
+launch tab that was navigated away, never takes back a claimed tab or
+navigates the tab its pointer falls to, reconnects after a restart, and refuses
+non-loopback Host headers. The live test repeats the launch-tab, claim,
+expiry, drift, and restart checks against the pinned CLI through the
+supervisor, headless, in a temporary runtime on free ports; it reports SKIP
+without a CLI (set `PLAYWRIGHT_MCP_SHARED_CLI`).
+
 Run the portable lifecycle tests:
 
 ```bash
@@ -210,6 +247,88 @@ and that the stop script stops a task-launched supervisor but never an
 unrelated process. The live checks run the pinned CLI headless in a temporary
 runtime; pass `-McpCli <path>` or set `PLAYWRIGHT_MCP_SHARED_CLI` when the
 canonical runtime does not hold it. Without a CLI they report SKIP.
+
+## Launch-tab dashboard
+
+The supervisor runs a small dependency-free Node.js server beside the service,
+`playwright-mcp-dashboard.mjs`, on a second loopback port (default 8932). It is
+one more MCP client of the service: it lists tabs on an interval and never
+selects, navigates, or closes another client's tab. Once a browser owns the
+profile, it shows itself in the browser's launch tab, replacing the blank page
+the browser opens at launch, so the first tab tells every agent and the human
+what is happening:
+
+- every open tab, its title and URL, and the agent that claimed it (owner,
+  task, age, expiry) or "unclaimed"; the dashboard's own tab is marked;
+- claims whose tab is gone or not yet matched;
+- the sign-in lease: who holds it and until when, or free;
+- service status: endpoints, versions, uptime, and the last poll.
+
+It serves one self-contained page (no external assets; light and dark; live
+updates over a single server-sent event stream) at `/`, the same state as JSON
+at `/api/state`, and `/healthz`. It answers only requests addressed to a
+loopback host, so a web page cannot read it through DNS rebinding. URLs are
+reduced to scheme, host, and path everywhere: queries and fragments are never
+recorded or shown, and claim and lease IDs are never shown.
+
+How the launch tab is taken. A new MCP session's current tab is the first tab
+of the shared context. When the dashboard attaches and finds that first tab
+still blank on two consecutive polls, it navigates it to the dashboard. If the
+first tab already holds a page, it opens the dashboard in a new tab instead. A
+restarted dashboard finds its existing tab by URL and changes nothing, so
+restarts are idempotent. Chrome cannot be told a launch URL here (Playwright
+rejects page arguments for persistent profiles), and an `initPage` hook runs
+for every page in every client session, so neither is used.
+
+Self-heal. A client whose MCP session is recreated (service restart, client
+reconnect) starts on the first tab, so a stray navigate can land in the launch
+tab. The dashboard follows its own tab by identity, not index. If that tab is
+navigated away and no claim matches it, the dashboard flags it at once and
+navigates it back after a grace period (30 seconds); after three restores in
+fifteen minutes it stops and flags the tab as contested. If an agent has
+claimed that page, or the tab was closed, the dashboard never touches it and
+reopens itself in a new tab.
+
+Attach mode. By default the dashboard attaches only while a browser owns the
+profile (`when-running`), so it never starts Chrome on its own. While it is
+attached it is a connected client, so the service keeps the browser open after
+the last agent disconnects; closing the browser window detaches it until an
+agent starts the browser again. `always` attaches at startup and so opens the
+browser with the service.
+
+Settings, with defaults: installer `-DashboardPort 8932` (0 turns the dashboard
+off; stored as `DashboardPort` in the service configuration, and as
+`dashboard_port` by the portable manager's `--dashboard-port`); launcher
+`-DashboardPort` and `-DashboardAttach`; environment variables
+`PLAYWRIGHT_MCP_SHARED_DASHBOARD_PORT`, `PLAYWRIGHT_MCP_SHARED_DASHBOARD_ATTACH`
+(`when-running`), `PLAYWRIGHT_MCP_SHARED_DASHBOARD_POLL_MS` (5000), and
+`PLAYWRIGHT_MCP_SHARED_DASHBOARD_RESTORE_GRACE_MS` (30000).
+
+### Tab claims
+
+`playwright-tab-claim.ps1` (portable: `tab_claim.py`) keeps
+`locks/tab-claims.json` beside the lease, with the same exclusive-handle
+read-modify-write. A claim is a cooperative label for the dashboard, never a
+lock.
+
+```powershell
+$claim = powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File "<RUNTIME>/bin/playwright-tab-claim.ps1" `
+  -Action Claim -Owner "<harness>:<workflow>" -Task "<short label>" `
+  -Url "<URL the tab was opened at>" | ConvertFrom-Json
+```
+
+- `Claim` (`-Owner`, `-Url`, optional `-Task` up to 120 characters,
+  `-TtlSeconds` 60-86400, default 3600) returns `claim_id`.
+- `Renew` (`-ClaimId`, optional `-Url`, `-TtlSeconds`) extends the expiry.
+- `Release` (`-ClaimId`) removes the claim.
+- `List` (or `Status`) returns active claims without their IDs.
+- Exit codes: 0 success; 76 claim not found or expired; 70 invalid input or
+  error. Output is one JSON line.
+
+The dashboard binds a new claim to the newest unclaimed tab whose URL matches
+and then follows that tab across navigation. Expired claims drop off the
+dashboard and are pruned on the next write.
 
 ## Shared federation model
 
@@ -496,7 +615,11 @@ rather than creating a client-owned child process.
 
 To bring an existing installation up to this behaviour, copy the updated
 scripts into the runtime `bin` directory as in section 3 and re-run the
-installer with `-Start`. No service restart is needed. If the previous
+installer with `-Start`. No service restart is needed. The launch-tab
+dashboard starts with the next supervisor: when the running supervisor is
+replaced (for example after it is stopped by PID and the task relaunches),
+the new supervisor adopts the running Node.js process and starts the
+dashboard, without restarting the browser. If the previous
 supervisor already died, the new supervisor adopts the running Node.js process
 and its PID does not change. If it is still alive, the new launch exits quietly
 and the old supervisor keeps running in its old form; closing its console
@@ -565,14 +688,17 @@ to reconcile it; do not silently rewrite their content.
 
 The essential runtime rule is serialized tab claiming: a new client creates a new
 tab and anchors it with its first navigation in the same `browser_tabs` call
-(action `new` with `url`) before another new client claims a tab. Afterward, each
-client retains an independent current-tab pointer while sharing profile state.
-A client closes its own tab when its browser work is finished; the blank tab the
-browser opens at launch stays open and keeps the browser running.
+(action `new` with `url`) before another new client claims a tab, then records
+the claim with the tab-claim helper. Afterward, each client retains an
+independent current-tab pointer while sharing profile state, and checks that
+pointer after any reconnect or idle gap, because a recreated session starts on
+the first tab. A client closes its own tab and releases its claim when its
+browser work is finished; the launch tab, which shows the dashboard, stays open
+and keeps the browser running.
 
 ## 8. Verification
 
-1. Confirm the five installed runtime scripts match their bundled sources.
+1. Confirm the installed runtime scripts match their bundled sources.
 2. Confirm package version, autostart identity, loopback listener, selected profile,
    and logs.
 3. Confirm both configs parse and resolve Playwright to the same HTTP endpoint.
@@ -588,6 +714,10 @@ browser opens at launch stays open and keeps the browser running.
    - disconnect one and confirm the other still works.
 6. Confirm Chrome uses the selected profile and is not launched with
    `--disable-extensions`.
+7. Confirm `state/dashboard.pid` names a live `node.exe` running the installed
+   dashboard script, only `127.0.0.1:8932` answers for it, and, once an agent
+   has started the browser, the first tab shows the dashboard with each
+   agent's claim against its tab.
 
 Do not create a synthetic passkey. The next real passkey or SSO flow is the
 functional authentication test.
@@ -598,7 +728,7 @@ functional authentication test.
 - Never select, navigate, or close a tab another agent owns.
 - Never log out, clear cookies/storage, or change shared authentication without
   explicit user approval.
-- Never expose port 8931 beyond loopback.
+- Never expose port 8931 or the dashboard port beyond loopback.
 - Never inspect, copy, commit, or retain profile contents or managed browser
   outputs.
 - Never automate password-manager sign-in or unlock.

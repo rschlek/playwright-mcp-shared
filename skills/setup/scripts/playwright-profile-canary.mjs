@@ -288,6 +288,10 @@ const powershellArgs = [
   // browser after teardown begins.
   "-MaxRestarts",
   "0",
+  // A throwaway runtime needs no launch-tab dashboard, and teardown does not
+  // stop one: it would hold the runtime's logs open and block deleting it.
+  "-DashboardPort",
+  "0",
 ];
 if (headless) powershellArgs.push("-Headless");
 

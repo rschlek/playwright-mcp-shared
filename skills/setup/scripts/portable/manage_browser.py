@@ -16,6 +16,7 @@ from pathlib import Path
 
 PACKAGE_VERSION = "0.0.79"
 DEFAULT_PORT = 8931
+DEFAULT_DASHBOARD_PORT = 8932
 RUN_VALUE = "PlaywrightMCPShared"
 LEGACY_RUN_VALUE = "SPROPlaywrightMCP"
 MACOS_LABEL = "com.playwright-mcp-shared.service"
@@ -200,6 +201,7 @@ def stop(runtime: Path) -> None:
     stop_pid(runtime / "state" / "node.pid",
              runtime / "package" / "node_modules" / "@playwright" / "mcp" / "cli.js")
     stop_pid(runtime / "state" / "service.pid", runtime / "bin" / "browser_service.py")
+    stop_pid(runtime / "state" / "dashboard.pid", runtime / "bin" / "playwright-mcp-dashboard.mjs")
     port = int(state.get("port", DEFAULT_PORT))
     deadline = time.monotonic() + 10
     while port_open(port) and time.monotonic() < deadline:
@@ -225,15 +227,17 @@ def install(args: argparse.Namespace) -> int:
     for path in (runtime / "bin", runtime / "logs", runtime / "outputs", runtime / "state", profile):
         path.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).resolve().parent
-    for name in ("browser_service.py", "auth_lease.py"):
+    for name in ("browser_service.py", "auth_lease.py", "tab_claim.py"):
         shutil.copy2(source / name, runtime / "bin" / name)
+    shutil.copy2(source.parent / "playwright-mcp-dashboard.mjs",
+                 runtime / "bin" / "playwright-mcp-dashboard.mjs")
     package = runtime / "package"
     subprocess.run([npm, "install", "--prefix", str(package),
                     f"@playwright/mcp@{PACKAGE_VERSION}", "--save-exact"], check=True)
     remove_autostart()
     stop(runtime)
     state = {"schema": 1, "package_version": PACKAGE_VERSION, "port": args.port,
-             "profile": str(profile), "node": node, "chrome": chrome,
+             "dashboard_port": args.dashboard_port, "profile": str(profile), "node": node, "chrome": chrome,
              "platform_status": "supported" if sys.platform == "win32" else "preview"}
     write_state(state)
     install_autostart(runtime)
@@ -258,8 +262,11 @@ def status() -> int:
     except (FileNotFoundError, ValueError):
         managed_pid = 0
     managed_listener = bool(managed_pid and str(cli.resolve()) in process_command(managed_pid))
+    dashboard_port = int(state.get("dashboard_port", DEFAULT_DASHBOARD_PORT))
     result = {"healthy": bool(state) and cli.is_file() and port_open(port) and managed_listener,
               "runtime": str(runtime), "profile": state.get("profile"), "port": port,
+              "dashboard_port": dashboard_port,
+              "dashboard_listener": bool(dashboard_port) and port_open(dashboard_port),
               "listener": port_open(port), "managed_listener": managed_listener,
               "chrome": chrome_path(),
               "package_version": state.get("package_version"),
@@ -297,6 +304,8 @@ def main() -> int:
     install_parser.add_argument("--profile")
     install_parser.add_argument("--adopt-existing-profile", action="store_true")
     install_parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    install_parser.add_argument("--dashboard-port", type=int, default=DEFAULT_DASHBOARD_PORT,
+                                help="loopback port of the launch-tab dashboard; 0 turns it off")
     sub.add_parser("status")
     uninstall_parser = sub.add_parser("uninstall")
     uninstall_parser.add_argument("--confirm", action="store_true")
@@ -304,6 +313,10 @@ def main() -> int:
     args = parser.parse_args()
     if getattr(args, "port", DEFAULT_PORT) < 1024 or getattr(args, "port", DEFAULT_PORT) > 65535:
         raise SystemExit("Port must be between 1024 and 65535")
+    dashboard_port = getattr(args, "dashboard_port", DEFAULT_DASHBOARD_PORT)
+    if dashboard_port != 0 and (dashboard_port < 1024 or dashboard_port > 65535 or
+                                dashboard_port == getattr(args, "port", DEFAULT_PORT)):
+        raise SystemExit("Dashboard port must be 0 or a port between 1024 and 65535 other than the service port")
     return install(args) if args.action == "install" else status() if args.action == "status" else uninstall(args)
 
 

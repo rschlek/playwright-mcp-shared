@@ -53,6 +53,67 @@ class PortableLifecycleTests(unittest.TestCase):
             )
             self.assertTrue(json.loads(release.stdout)["success"])
 
+    def run_claim(self, env: dict, *args: str) -> tuple[int, dict]:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "tab_claim.py"), *args],
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        return result.returncode, json.loads(result.stdout)
+
+    def test_tab_claim_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ, PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT=directory)
+            code, claim = self.run_claim(
+                env, "claim", "--owner", "unit-test", "--task", "read docs",
+                "--url", "https://user:pw@Example.com:443/docs?token=secret#frag",
+            )
+            self.assertEqual(0, code)
+            self.assertTrue(claim["claimed"])
+            self.assertEqual("https://example.com/docs", claim["url"])
+            registry = Path(directory) / "locks" / "tab-claims.json"
+            self.assertNotIn("secret", registry.read_text(encoding="utf-8"))
+
+            code, listed = self.run_claim(env, "list")
+            self.assertEqual((0, 1), (code, listed["count"]))
+            self.assertNotIn(claim["claim_id"], json.dumps(listed))
+
+            code, renewed = self.run_claim(env, "renew", "--claim-id", claim["claim_id"],
+                                           "--url", "https://example.com/next?x=1")
+            self.assertEqual(0, code)
+            self.assertEqual("https://example.com/next", renewed["url"])
+
+            code, wrong = self.run_claim(env, "release", "--claim-id", "0" * 32)
+            self.assertEqual((76, "claim-not-found-or-expired"), (code, wrong["reason"]))
+            code, released = self.run_claim(env, "release", "--claim-id", claim["claim_id"])
+            self.assertEqual(0, code)
+            self.assertTrue(released["success"])
+
+    def test_tab_claim_expiry_and_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ, PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT=directory)
+            _, claim = self.run_claim(env, "claim", "--owner", "unit-test", "--url", "https://example.com/")
+            self.run_claim(env, "claim", "--owner", "other", "--url", "https://example.com/b")
+            registry = Path(directory) / "locks" / "tab-claims.json"
+            state = json.loads(registry.read_text(encoding="utf-8"))
+            for entry in state["claims"]:
+                if entry["claim_id"] == claim["claim_id"]:
+                    # The PowerShell helper writes seven-digit fractions and Z.
+                    entry["expires_utc"] = "2000-01-01T00:00:00.0000000Z"
+            registry.write_text(json.dumps(state), encoding="utf-8")
+            code, listed = self.run_claim(env, "status")
+            self.assertEqual((0, 1), (code, listed["count"]))
+            code, _ = self.run_claim(env, "renew", "--claim-id", claim["claim_id"])
+            self.assertEqual(76, code)
+            self.assertNotIn(claim["claim_id"], registry.read_text(encoding="utf-8"))
+            for args in (("claim", "--owner", "bad owner", "--url", "https://example.com/"),
+                         ("claim", "--owner", "ok", "--url", "not a url"),
+                         ("claim", "--owner", "ok"),
+                         ("renew", "--claim-id", "nope")):
+                code, result = self.run_claim(env, *args)
+                self.assertEqual((70, "error"), (code, result["reason"]), args)
+
     def test_manager_ignores_an_unmanaged_default_port(self) -> None:
         manager = load_module("portable_browser_manager", SCRIPTS / "manage_browser.py")
         with tempfile.TemporaryDirectory() as directory:
