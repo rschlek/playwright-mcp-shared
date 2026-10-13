@@ -2,22 +2,40 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-if (process.platform !== "win32") {
-  console.log("SKIP: shared Playwright MCP smoke test requires Windows.");
+const isWindows = process.platform === "win32";
+if (!isWindows && process.platform !== "linux") {
+  console.log("SKIP: shared Playwright MCP smoke test requires Windows or Linux.");
   process.exit(0);
 }
 
-const runtimeRoot = path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared");
+const runtimeRoot = isWindows
+  ? path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared")
+  : process.env.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT ||
+    path.join(process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share"), "playwright-mcp-shared");
 const mcpCli =
   process.env.PLAYWRIGHT_MCP_SHARED_CLI ||
   path.join(runtimeRoot, "package", "node_modules", "@playwright", "mcp", "cli.js");
 const testsDir = path.dirname(fileURLToPath(import.meta.url));
-const serverScript = path.resolve(testsDir, "..", "scripts", "playwright-mcp-shared.ps1");
-const leaseScript = path.resolve(testsDir, "..", "scripts", "playwright-auth-lease.ps1");
+const serverScript = path.resolve(
+  testsDir,
+  "..",
+  "scripts",
+  isWindows ? "playwright-mcp-shared.ps1" : "playwright-mcp-shared.sh",
+);
+const leaseScript = path.resolve(
+  testsDir,
+  "..",
+  "scripts",
+  isWindows ? "playwright-auth-lease.ps1" : "playwright-auth-lease.sh",
+);
+const launcherProgram = isWindows ? "powershell.exe" : "bash";
+const launcherPrefix = isWindows
+  ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]
+  : [];
 const tempRoot = await mkdtemp(path.join(tmpdir(), "playwright-mcp-shared-smoke-"));
 const profileRoot = path.join(tempRoot, "profile");
 const endpointArgument = process.argv.find((value) => value.startsWith("--endpoint="));
@@ -153,19 +171,8 @@ function blankTabCount(tabList) {
 
 function runLease(args) {
   const result = spawnSync(
-    "powershell.exe",
-    [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      leaseScript,
-      "-RuntimeRoot",
-      tempRoot,
-      ...args,
-    ],
+    launcherProgram,
+    [...launcherPrefix, leaseScript, "-RuntimeRoot", tempRoot, ...args],
     { encoding: "utf8", windowsHide: true },
   );
   const payload = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
@@ -204,6 +211,15 @@ async function removeTempRoot() {
 }
 
 function stopTestProcesses() {
+  if (!isWindows) {
+    // The test-only runtime root appears in every managed command line.
+    try {
+      execFileSync("pkill", ["-f", "--", tempRoot], { timeout: 30_000 });
+    } catch {
+      // The exact test-only profile path is retried by removeTempRoot below.
+    }
+    return;
+  }
   const command =
     "$root=$env:PLAYWRIGHT_SHARED_TEST_ROOT; " +
     "$slashRoot=$root.Replace('\\','/'); " +
@@ -300,14 +316,9 @@ try {
   const endpoint = externalEndpoint || `http://localhost:${mcpPort}/mcp`;
   if (!externalEndpoint)
     mcpProcess = spawn(
-    "powershell.exe",
+    launcherProgram,
     [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
+      ...launcherPrefix,
       serverScript,
       "-RuntimeRoot",
       tempRoot,
@@ -318,8 +329,9 @@ try {
       "-Port",
       String(mcpPort),
       "-Headless",
-      // Restart supervision is covered by test-windows-autostart.ps1. This
-      // disposable smoke runtime must exit after its child is stopped.
+      // Restart supervision is covered by test-windows-autostart.ps1 and
+      // test-linux-autostart.mjs. This disposable smoke runtime must exit
+      // after its child is stopped.
       "-MaxRestarts",
       "0",
       // The launch-tab dashboard is covered by

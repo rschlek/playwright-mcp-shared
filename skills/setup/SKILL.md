@@ -55,6 +55,12 @@ for a consistent authenticated experience across agents.
   - `scripts/playwright-auth-health.mjs`
   - `scripts/playwright-profile-canary.mjs` (isolated diagnostics only; never
     copied over the managed service)
+- Linux siblings of the PowerShell scripts, same flags and output:
+  - `scripts/playwright-mcp-shared.sh`
+  - `scripts/install-playwright-mcp-shared-autostart.sh`
+  - `scripts/stop-playwright-mcp-shared.sh`
+  - `scripts/playwright-auth-lease.sh`
+  - `scripts/playwright-tab-claim.sh`
 - Shared behavior asset: `assets/shared-browser-guidance.md`.
 - Password-manager choice and service URL are user-provided configuration. This
   plugin does not prescribe, bundle, or automate a credential provider.
@@ -77,9 +83,69 @@ client to it over loopback HTTP.
   the Windows PowerShell installation sections. Continue with client
   reconciliation, operating-contract installation, and verification in sections
   6 through 8.
+- On Linux, use the bash lifecycle in "Linux lifecycle" below in place of the
+  PowerShell installation steps, then continue with sections 4 and 6 through 8.
 - The portable manager detects the legacy runtime when it exists and the new
   canonical runtime does not. It continues managing that directory in place so
   existing cookies and sign-ins are not copied or discarded.
+
+## Linux lifecycle
+
+The bash scripts mirror the PowerShell lifecycle; a systemd `--user` unit
+takes the place of the scheduled task.
+
+- Runtime: `${XDG_DATA_HOME:-~/.local/share}/playwright-mcp-shared`
+  (override with `PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT`), laid out as in
+  "Runtime" below with the `.sh` scripts in `bin/` and
+  `state/linux-service-config.json` in place of the Windows configuration.
+- Install: copy the five `.sh` scripts, `playwright-mcp-dashboard.mjs`, and
+  `playwright-auth-health.mjs` into `bin/` under the managed-file rules of
+  section 3 (mode 755 for the scripts), install the pinned package with the
+  same `npm install --prefix`, then from a terminal in the graphical session
+  run `bash <RUNTIME>/bin/install-playwright-mcp-shared-autostart.sh -Start`.
+  It accepts `-Port`, `-DashboardPort`, `-ProfilePath`, `-NodePath`, and
+  `-UnitName` (default `playwright-mcp-shared`), records a stable Node.js path,
+  and imports the session's display variables into the user manager.
+- The unit lives at
+  `${XDG_CONFIG_HOME:-~/.config}/systemd/user/playwright-mcp-shared.service`.
+  It starts with the graphical session (`After=`, `PartOf=`, and `WantedBy=`
+  `graphical-session.target`) and restarts with `Restart=always` and
+  `RestartSec=5`; an explicit stop or the session ending is never restarted.
+  Logs: `journalctl --user -u playwright-mcp-shared` and
+  `logs/shared-server.bootstrap.log`.
+- Supervision matches Windows: the launcher restarts an exited node after
+  `-RestartDelaySeconds` (3) up to `-MaxRestarts` (-1, unlimited), adopts a
+  managed node left serving by a supervisor that died, refuses a port held by
+  any other process (exit 70), and removes only PID files that still hold its
+  own values. A restarted node does not open the browser; it starts when an
+  agent next needs it.
+- Upgrade: copy the new scripts and package, then run the installer with
+  `-Start` again. It restarts the unit, which restarts the browser: open tabs
+  and session-only cookies are lost, and clients reconnect on their next call.
+- Stop: `bash <RUNTIME>/bin/stop-playwright-mcp-shared.sh`. It stops the unit
+  only when the unit runs this runtime's launcher, stops the supervisor before
+  the node, never signals a recorded PID that now belongs to another program,
+  and fails if the port stays open or the unit comes back. Start again with
+  `systemctl --user start playwright-mcp-shared`.
+- Claims and the lease: `bash <RUNTIME>/bin/playwright-tab-claim.sh` and
+  `bash <RUNTIME>/bin/playwright-auth-lease.sh` take the same flags and print
+  the same JSON and exit codes as the PowerShell helpers.
+- Test:
+
+  ```bash
+  node <SKILL_DIR>/tests/test-linux-autostart.mjs [--systemd]
+  ```
+
+  Require PASS. With a stub CLI and no browser it proves restart after an
+  exit, refusal of a foreign port owner, own-value PID cleanup, adoption of a
+  managed node after the supervisor is killed (the node does not hold the
+  singleton lock), a quiet second launch, the stop script, and the unit the
+  installer writes. With the pinned CLI (`PLAYWRIGHT_MCP_SHARED_CLI` or
+  `--cli=<path>`) it also proves the browser starts only on an agent's tool
+  call and stays closed after a human closes it; without one those cases
+  report SKIP. `--systemd` adds a transient test-only unit that is killed,
+  restarted by systemd, and stopped for good. The shared, lease, tab-claim,
+  health, and canary tests in section 3 also run on Linux.
 
 ## Runtime
 

@@ -2,20 +2,32 @@ import { execFileSync, spawn } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-if (process.platform !== "win32") {
-  console.log("SKIP: Playwright authentication health test requires Windows.");
+const isWindows = process.platform === "win32";
+if (!isWindows && process.platform !== "linux") {
+  console.log("SKIP: Playwright authentication health test requires Windows or Linux.");
   process.exit(0);
 }
 
 const testsDir = path.dirname(fileURLToPath(import.meta.url));
 const skillDir = path.resolve(testsDir, "..");
 const healthScript = path.join(skillDir, "scripts", "playwright-auth-health.mjs");
-const serverScript = path.join(skillDir, "scripts", "playwright-mcp-shared.ps1");
-const managedRuntime = path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared");
+const serverScript = path.join(
+  skillDir,
+  "scripts",
+  isWindows ? "playwright-mcp-shared.ps1" : "playwright-mcp-shared.sh",
+);
+const managedRuntime = isWindows
+  ? path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared")
+  : process.env.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT ||
+    path.join(process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share"), "playwright-mcp-shared");
+const launcherProgram = isWindows ? "powershell.exe" : "bash";
+const launcherPrefix = isWindows
+  ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]
+  : [];
 const mcpCli =
   process.env.PLAYWRIGHT_MCP_SHARED_CLI ||
   path.join(
@@ -77,6 +89,13 @@ function parseReport(stdout) {
 }
 
 function stopTempProcesses() {
+  if (!isWindows) {
+    // The test-only runtime root appears in every managed command line.
+    try {
+      execFileSync("pkill", ["-f", "--", tempRoot], { timeout: 30_000 });
+    } catch {}
+    return;
+  }
   const command =
     "$root=$env:PLAYWRIGHT_HEALTH_TEST_ROOT; " +
     "Get-CimInstance Win32_Process | Where-Object { " +
@@ -127,14 +146,9 @@ try {
   const mcpPort = await freePort();
   const endpoint = `http://localhost:${mcpPort}/mcp`;
   mcpProcess = spawn(
-    "powershell.exe",
+    launcherProgram,
     [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
+      ...launcherPrefix,
       serverScript,
       "-RuntimeRoot",
       tempRoot,

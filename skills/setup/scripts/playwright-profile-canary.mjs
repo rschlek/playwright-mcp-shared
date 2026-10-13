@@ -1,13 +1,14 @@
 import { execFileSync, spawn } from "node:child_process";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
-if (process.platform !== "win32") {
-  console.error("The Playwright profile canary requires Windows.");
+const isWindows = process.platform === "win32";
+if (!isWindows && process.platform !== "linux") {
+  console.error("The Playwright profile canary requires Windows or Linux.");
   process.exit(2);
 }
 
@@ -37,14 +38,20 @@ const headless = hasFlag("headless");
 if (discardOnExit && !nonInteractive)
   throw new Error("Interactive canaries require the explicit DISCARD confirmation.");
 
-const runtimeRoot = path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared");
+const runtimeRoot = isWindows
+  ? path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared")
+  : process.env.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT ||
+    path.join(process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share"), "playwright-mcp-shared");
 const mcpCli =
   option("mcp-cli") ||
   path.join(runtimeRoot, "package", "node_modules", "@playwright", "mcp", "cli.js");
 await access(mcpCli);
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const serverScript = path.join(scriptDir, "playwright-mcp-shared.ps1");
+const serverScript = path.join(
+  scriptDir,
+  isWindows ? "playwright-mcp-shared.ps1" : "playwright-mcp-shared.sh",
+);
 const tempRoot = await mkdtemp(path.join(tmpdir(), "playwright-profile-canary-"));
 const profileRoot = path.join(tempRoot, "profile");
 const timeoutMs = 120_000;
@@ -209,6 +216,16 @@ async function navigate(client, url) {
 }
 
 function stopTempProcesses() {
+  if (!isWindows) {
+    // Every managed process carries the randomized canary root in its command
+    // line, so this reaches only this canary's own wrapper, node, and Chrome.
+    try {
+      execFileSync("pkill", ["-f", "--", tempRoot], { timeout: 30_000 });
+    } catch {
+      // The wrapper or browser may already be stopped.
+    }
+    return;
+  }
   const command =
     "$root=$env:PLAYWRIGHT_CANARY_ROOT; " +
     "$slashRoot=$root.Replace('\\','/'); " +
@@ -268,13 +285,11 @@ async function stopCanary(client) {
 
 const mcpPort = await freePort();
 const endpoint = `http://localhost:${mcpPort}/mcp`;
-const powershellArgs = [
-  "-NoLogo",
-  "-NoProfile",
-  "-NonInteractive",
-  "-ExecutionPolicy",
-  "Bypass",
-  "-File",
+const launcherProgram = isWindows ? "powershell.exe" : "bash";
+const launcherArgs = [
+  ...(isWindows
+    ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]
+    : []),
   serverScript,
   "-RuntimeRoot",
   tempRoot,
@@ -293,9 +308,9 @@ const powershellArgs = [
   "-DashboardPort",
   "0",
 ];
-if (headless) powershellArgs.push("-Headless");
+if (headless) launcherArgs.push("-Headless");
 
-mcpProcess = spawn("powershell.exe", powershellArgs, {
+mcpProcess = spawn(launcherProgram, launcherArgs, {
   env: process.env,
   stdio: ["ignore", "ignore", "pipe"],
   windowsHide: true,

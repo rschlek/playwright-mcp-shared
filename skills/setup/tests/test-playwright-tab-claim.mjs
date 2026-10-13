@@ -4,21 +4,33 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-if (process.platform !== "win32") {
-  console.log("SKIP: Playwright tab-claim helper test requires Windows; test_portable_lifecycle.py covers the portable helper.");
+// Exercises playwright-tab-claim.ps1 on Windows and playwright-tab-claim.sh
+// on Linux.
+const isWindows = process.platform === "win32";
+if (!isWindows && process.platform !== "linux") {
+  console.log("SKIP: Playwright tab-claim helper test requires Windows or Linux; test_portable_lifecycle.py covers the portable helper.");
   process.exit(0);
 }
 
 const testsDir = path.dirname(fileURLToPath(import.meta.url));
-const claimScript = path.resolve(testsDir, "..", "scripts", "playwright-tab-claim.ps1");
+const claimScript = path.resolve(
+  testsDir,
+  "..",
+  "scripts",
+  isWindows ? "playwright-tab-claim.ps1" : "playwright-tab-claim.sh",
+);
+const launcherProgram = isWindows ? "powershell.exe" : "bash";
+const launcherPrefix = isWindows
+  ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]
+  : [];
 const tempRoot = await mkdtemp(path.join(tmpdir(), "playwright-tab-claim-"));
 const registry = path.join(tempRoot, "locks", "tab-claims.json");
 
 function runClaim(args) {
   return new Promise((resolve, reject) => {
     const child = spawn(
-      "powershell.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", claimScript, "-RuntimeRoot", tempRoot, ...args],
+      launcherProgram,
+      [...launcherPrefix, claimScript, "-RuntimeRoot", tempRoot, ...args],
       { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
     );
     let stdout = "";
