@@ -496,7 +496,7 @@ try {
   const goneAt = Date.now();
   const closedBy = await waitUntil(() => !lib.browserRunning(profileRoot) && profileBrowserPids().length === 0, "the browser to close after the last agent left", 30_000);
   const pollAfterClose = Date.now();
-  state = await waitFor(dashPort, (s) => s.launch_tab.status === "detached" && Date.parse(s.last_poll_utc || s.service.last_poll_utc) > pollAfterClose, "dashboard still polling after the browser closed", 15_000);
+  state = await waitFor(dashPort, (s) => s.launch_tab.status === "detached" && Date.parse(s.service.last_poll_utc) > pollAfterClose, "dashboard still polling after the browser closed", 15_000);
   await sleep(3000);
   if (lib.browserRunning(profileRoot) || profileBrowserPids().length) throw new Error("Something started the browser again after the last agent left.");
   if (!alive(dashboardPid)) throw new Error("The dashboard exited when the browser closed.");
