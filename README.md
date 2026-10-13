@@ -41,7 +41,8 @@ portable Windows/macOS lifecycle.
 
 ## Requirements
 
-- Windows with PowerShell 5.1 or later, or macOS preview
+- Windows with PowerShell 5.1 or later; Linux with bash and a systemd user
+  session; or macOS preview through the portable lifecycle
 - Chrome
 - Node.js and npm
 - Claude Code, Codex, or another MCP client that supports an HTTP MCP server
