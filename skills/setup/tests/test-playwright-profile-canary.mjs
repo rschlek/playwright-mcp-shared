@@ -4,8 +4,8 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-if (process.platform !== "win32") {
-  console.log("SKIP: Playwright profile canary test requires Windows.");
+if (process.platform !== "win32" && process.platform !== "linux") {
+  console.log("SKIP: Playwright profile canary test requires Windows or Linux.");
   process.exit(0);
 }
 

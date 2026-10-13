@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
+import os from "node:os";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-if (process.platform !== "win32") {
-  console.error("The Playwright authentication health check requires Windows.");
+const isWindows = process.platform === "win32";
+if (!isWindows && process.platform !== "linux") {
+  console.error("The Playwright authentication health check requires Windows or Linux.");
   process.exit(2);
 }
 
@@ -21,8 +23,11 @@ function target(raw) {
 }
 
 const endpoint = option("endpoint") || "http://localhost:8931/mcp";
-const runtimeRoot =
-  option("runtime-root") || path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared");
+const defaultRuntimeRoot = isWindows
+  ? path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared")
+  : process.env.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT ||
+    path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "playwright-mcp-shared");
+const runtimeRoot = option("runtime-root") || defaultRuntimeRoot;
 const specPath = option("spec");
 if (!specPath) throw new Error("Pass a service-neutral probe specification with --spec=<path>.");
 const spec = JSON.parse(await readFile(specPath, "utf8"));
@@ -54,29 +59,36 @@ const probes = spec.probes.map((probe) => {
   };
 });
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const leaseScript = path.join(scriptDir, "playwright-auth-lease.ps1");
+const leaseScript = path.join(
+  scriptDir,
+  isWindows ? "playwright-auth-lease.ps1" : "playwright-auth-lease.sh",
+);
 const leaseOwner = `health-check-${process.pid}`;
 let leaseId;
 let client;
 let claimed = false;
 
 function runLease(args) {
-  const result = spawnSync(
-    "powershell.exe",
-    [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      leaseScript,
-      "-RuntimeRoot",
-      runtimeRoot,
-      ...args,
-    ],
-    { encoding: "utf8", windowsHide: true },
-  );
+  const result = isWindows
+    ? spawnSync(
+        "powershell.exe",
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          leaseScript,
+          "-RuntimeRoot",
+          runtimeRoot,
+          ...args,
+        ],
+        { encoding: "utf8", windowsHide: true },
+      )
+    : spawnSync("bash", [leaseScript, "-RuntimeRoot", runtimeRoot, ...args], {
+        encoding: "utf8",
+      });
   const line = result.stdout.trim().split(/\r?\n/).at(-1);
   let payload;
   try {
