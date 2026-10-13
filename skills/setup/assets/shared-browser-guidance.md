@@ -31,7 +31,7 @@ do not loop login or clear state speculatively.
    initial page. If the call reports an error, the new tab still exists and is
    current: navigate it with `browser_navigate` or close it; never open another.
    Then register the claim so the dashboard shows it: run the installed
-   `playwright-tab-claim.ps1` with `-Action Claim -Owner "<harness>:<workflow>"
+   `playwright-tab-claim.ps1` (`playwright-tab-claim.sh` on Linux) with `-Action Claim -Owner "<harness>:<workflow>"
    -Task "<short label>" -Url "<the URL just opened>"` (portable runtimes:
    `tab_claim.py claim --owner ... --task ... --url ...`) and keep the
    returned `claim_id`. A claim is a label, not a lock; if the helper is
@@ -69,7 +69,7 @@ do not loop login or clear state speculatively.
 7. Tab ownership does not serialize authentication. Only one client may mutate
    shared authentication state at a time; other clients wait until that flow has
    reached a verified success or failure boundary. Acquire the installed
-   `playwright-auth-lease.ps1` before sign-in, sign-out, account selection,
+   `playwright-auth-lease.ps1` (`playwright-auth-lease.sh` on Linux) before sign-in, sign-out, account selection,
    tenant/environment changes, or SSO recovery; release its exact lease ID in a
    `finally` path. If the lease is busy or the helper is unavailable, do not
    begin authentication. Ordinary authenticated browsing does not need the lease.
