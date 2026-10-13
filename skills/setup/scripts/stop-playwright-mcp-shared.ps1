@@ -115,6 +115,10 @@ Stop-ValidatedProcess `
     -PidPath (Join-Path $StateRoot "shared-node.pid") `
     -ExpectedNames @("node.exe") `
     -ExpectedCommandFragments @($ExpectedCli)
+Stop-ValidatedProcess `
+    -PidPath (Join-Path $StateRoot "dashboard.pid") `
+    -ExpectedNames @("node.exe") `
+    -ExpectedCommandFragments @((Join-Path $RuntimeRoot "bin\playwright-mcp-dashboard.mjs"))
 
 function Test-LoopbackPort {
     param([int]$TargetPort)

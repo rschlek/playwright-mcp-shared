@@ -16,7 +16,12 @@ their own current-tab pointers.
 ## Safety model
 
 - The service binds only to `127.0.0.1`.
-- Each client claims and owns its own tab.
+- Each client claims and owns its own tab, and labels the claim in a shared
+  registry.
+- The browser's first tab shows a loopback-only live dashboard: every open
+  tab with the agent that claimed it, the authentication lease, and service
+  status. It shows URLs without queries or fragments and puts itself back if
+  an unclaimed launch tab is navigated away.
 - Authentication mutations are serialized through a lease.
 - Ambiguous account selection and credential entry remain human-controlled.
 - Health probes report only coarse status and never page text, principals,
@@ -30,8 +35,9 @@ their own current-tab pointers.
 
 `spro-browser:setup` installs, configures, verifies, repairs, or removes
 the shared service. It includes lifecycle scripts and automated tests for
-multi-client behavior, authentication leasing, redacted health checks, and
-profile-canary isolation, plus the portable Windows/macOS lifecycle.
+multi-client behavior, authentication leasing, tab claims, the launch-tab
+dashboard, redacted health checks, and profile-canary isolation, plus the
+portable Windows/macOS lifecycle.
 
 ## Requirements
 
