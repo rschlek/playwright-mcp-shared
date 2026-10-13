@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-if (process.platform !== "win32") {
-  console.log("SKIP: Playwright authentication lease test requires Windows.");
+const isWindows = process.platform === "win32";
+if (!isWindows && process.platform !== "linux") {
+  console.log("SKIP: Playwright authentication lease test requires Windows or Linux.");
   process.exit(0);
 }
 
@@ -14,26 +15,19 @@ const leaseScript = path.resolve(
   testsDir,
   "..",
   "scripts",
-  "playwright-auth-lease.ps1",
+  isWindows ? "playwright-auth-lease.ps1" : "playwright-auth-lease.sh",
 );
+const launcherProgram = isWindows ? "powershell.exe" : "bash";
+const launcherPrefix = isWindows
+  ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]
+  : [];
 const tempRoot = await mkdtemp(path.join(tmpdir(), "playwright-auth-lease-"));
 
 function runLease(args) {
   return new Promise((resolve, reject) => {
     const child = spawn(
-      "powershell.exe",
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        leaseScript,
-        "-RuntimeRoot",
-        tempRoot,
-        ...args,
-      ],
+      launcherProgram,
+      [...launcherPrefix, leaseScript, "-RuntimeRoot", tempRoot, ...args],
       { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
     );
     let stdout = "";
