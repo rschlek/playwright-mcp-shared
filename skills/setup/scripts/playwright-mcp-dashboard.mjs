@@ -2,14 +2,21 @@
 // Live dashboard for the shared Playwright MCP service.
 //
 // A dependency-free, loopback-only HTTP server that:
-//   - acts as one more MCP client of the shared service and lists its tabs on
-//     an interval (it never selects, navigates, or closes another client's
-//     tab);
+//   - while a browser owns the profile, lists the shared service's tabs on an
+//     interval (it never navigates or closes another client's tab);
 //   - shows the dashboard itself in the browser's launch tab, in place of the
 //     blank page the browser opens at launch;
 //   - joins the live tab list with the tab-claim registry and the
 //     authentication lease, and serves the result as one self-contained page
 //     plus a JSON endpoint.
+//
+// The browser runs on demand: an agent's tool call starts it, and the service
+// closes it when its last client goes away. The dashboard never starts the
+// browser and never keeps it open. It checks that a browser owns the profile
+// before every poll, and each poll uses its own MCP session that it deletes
+// before the poll ends, so the dashboard is never the client that holds the
+// browser open. A browser a person closed stays closed until an agent needs
+// it again.
 //
 // It reads the claim registry and the lease; it never writes either.
 
@@ -24,11 +31,13 @@ export const DEFAULTS = Object.freeze({
   port: 8932,
   pollMs: 5000,
   restoreGraceMs: 30000,
-  attach: "when-running",
   maxRestores: 3,
   restoreWindowMs: 15 * 60 * 1000,
   failuresBeforeReconnect: 3,
 });
+
+export const DETAIL_NOT_RUNNING = "The browser is not running. The dashboard attaches when an agent starts it.";
+export const DETAIL_CLOSED = "The browser was closed. It starts again when an agent needs it.";
 
 const CLIENT_NAME = "shared-browser-dashboard";
 export const PAGE_TITLE = "Shared browser - launch tab";
@@ -240,6 +249,17 @@ export function browserRunning(profile) {
   }
 }
 
+// Which browser process owns the profile, where the platform says so: the
+// `SingletonLock` target names the host and process. Null when unknown.
+export function browserInstance(profile) {
+  if (!profile || process.platform === "win32") return null;
+  try {
+    return String(fs.readlinkSync(path.join(profile, "SingletonLock")));
+  } catch {
+    return null;
+  }
+}
+
 function packageVersion(cli) {
   if (!cli) return null;
   const result = readJsonFile(path.join(path.dirname(cli), "package.json"));
@@ -370,6 +390,7 @@ export class Dashboard {
     this.dashboardUrl = `${this.origin}/`;
     this.startedAt = Date.now();
     this.packageVersion = packageVersion(this.options.mcpCli);
+    // The MCP session of the poll in progress; null between polls.
     this.session = null;
     this.tabs = [];
     this.nextTabId = 1;
@@ -378,12 +399,14 @@ export class Dashboard {
     this.failures = 0;
     this.blankSeenAt = null;
     this.blankTabId = null;
+    this.instance = null;
     this.mcp = { reachable: false, version: null, error: null };
     this.browser = { attached: false, running: null };
     this.launch = { status: "detached", detail: "", drifted_since_utc: null, drifted_to: null, restores: [], last_restore_utc: null, last_event: null };
-    // A dashboard that was killed cannot close its MCP session, and the
-    // service keeps idle sessions forever. Remember the session so the next
-    // run can close it.
+    // A session counts as a client of the shared browser and the service
+    // keeps idle sessions forever, so a dashboard killed in the middle of a
+    // poll would hold the browser open. Remember the session so the next
+    // poll or the next run can close it.
     this.sessionFile = path.join(this.options.runtimeRoot, "state", "dashboard-session.json");
     this.staleSessionId = this.readStaleSession();
     this.claims = [];
@@ -427,6 +450,31 @@ export class Dashboard {
     await stale.close();
   }
 
+  // Open the session for one poll and record it before its first tool call.
+  async openSession() {
+    const session = new McpSession(this.options.mcpPort);
+    await session.initialize();
+    this.session = session;
+    this.rememberSession(session.sessionId);
+    return session;
+  }
+
+  // Delete the poll's session so it stops counting as a client of the
+  // browser. If the delete fails, the next poll tries again.
+  async endSession() {
+    const session = this.session;
+    this.session = null;
+    if (!session?.sessionId) return;
+    const id = session.sessionId;
+    try {
+      await session.request("DELETE");
+      this.rememberSession(null);
+    } catch {
+      this.staleSessionId = id;
+    }
+    session.sessionId = null;
+  }
+
   event(kind, detail) {
     this.launch.last_event = { kind, utc: new Date().toISOString(), detail };
   }
@@ -437,15 +485,15 @@ export class Dashboard {
     return isDashboardUrl(tab.url, this.origin);
   }
 
-  async resetSession(deleteSession) {
-    const session = this.session;
-    this.session = null;
+  // Drop everything known about the browser's tabs: the browser closed, or
+  // another browser process now owns the profile.
+  forgetBrowser() {
     this.tabs = [];
     this.dashTabId = null;
     this.blankSeenAt = null;
+    this.blankTabId = null;
     this.bindings.clear();
     this.browser.attached = false;
-    if (session && deleteSession) await session.close();
   }
 
   async list() {
@@ -460,6 +508,20 @@ export class Dashboard {
     return new Set(this.bindings.values());
   }
 
+  // Make a tab this poll's current tab so it can be navigated. A new session
+  // starts on the first tab, so the launch tab needs no select; any other
+  // tab is selected first. Returns the tab, or null if it could not be made
+  // current.
+  async focusTab(tabId) {
+    let tab = this.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return null;
+    if (tab.current) return tab;
+    await this.session.callTool("browser_tabs", { action: "select", index: tab.index });
+    await this.list();
+    tab = this.tabs.find((candidate) => candidate.id === tabId);
+    return tab && tab.current ? tab : null;
+  }
+
   async openOwnDashboardTab(reason) {
     await this.session.callTool("browser_tabs", { action: "new", url: this.dashboardUrl });
     await this.list();
@@ -469,36 +531,31 @@ export class Dashboard {
     this.event("relocated", reason);
   }
 
-  // First poll of a new session: the session's current tab is the first
-  // page of the shared context, which is the browser's launch tab.
+  // The dashboard does not know its tab yet: adopt a tab that already shows
+  // the dashboard, or take the blank launch tab the browser opened.
   async establishLaunchTab() {
-    const current = this.tabs.find((tab) => tab.current);
-    if (current && isDashboardUrl(current.url, this.origin)) {
-      this.dashTabId = current.id;
-      this.setHealthy(current.index === 0 ? "" : "The dashboard is not in the first tab.");
-      return;
-    }
     const existing = this.tabs.find((tab) => isDashboardUrl(tab.url, this.origin));
     if (existing) {
-      await this.session.callTool("browser_tabs", { action: "select", index: existing.index });
-      await this.list();
       this.dashTabId = existing.id;
       this.setHealthy(existing.index === 0 ? "" : "The dashboard is not in the first tab.");
       return;
     }
-    if (current && current.index === 0 && current.url === "about:blank" && !this.claimedTabIds().has(current.id)) {
+    const first = this.tabs[0];
+    if (first && first.url === "about:blank" && !this.claimedTabIds().has(first.id)) {
       // A tab another client just opened is blank only for a moment, so
       // require the blank launch tab on two consecutive polls.
-      if (this.blankSeenAt === null || this.blankTabId !== current.id) {
+      if (this.blankSeenAt === null || this.blankTabId !== first.id) {
         this.blankSeenAt = Date.now();
-        this.blankTabId = current.id;
+        this.blankTabId = first.id;
         this.launch.status = "blank";
         this.launch.detail = "Waiting to confirm the blank launch tab.";
         return;
       }
+      const target = await this.focusTab(first.id);
+      if (!target || target.url !== "about:blank") return;
       await this.session.callTool("browser_navigate", { url: this.dashboardUrl });
       await this.list();
-      const now = this.tabs.find((tab) => tab.current);
+      const now = this.tabs.find((tab) => tab.id === first.id);
       if (now && isDashboardUrl(now.url, this.origin)) {
         this.dashTabId = now.id;
         this.setHealthy("");
@@ -524,12 +581,9 @@ export class Dashboard {
   async checkLaunchTab() {
     const dash = this.tabs.find((tab) => tab.id === this.dashTabId);
     if (!dash) {
-      // The dashboard's tab closed; this session's pointer moved to some
-      // other tab, which must not be touched.
+      // The dashboard's tab closed. Never reuse another tab for it.
       const existing = this.tabs.find((tab) => isDashboardUrl(tab.url, this.origin));
       if (existing) {
-        await this.session.callTool("browser_tabs", { action: "select", index: existing.index });
-        await this.list();
         this.dashTabId = existing.id;
         this.setHealthy("");
         this.event("readopted", "The dashboard tab was closed; another dashboard tab was adopted.");
@@ -537,11 +591,6 @@ export class Dashboard {
       }
       if (this.tabs.length === 0) return;
       await this.openOwnDashboardTab("The launch tab was closed, so the dashboard reopened in a new tab.");
-      return;
-    }
-    if (!dash.current) {
-      this.launch.status = "uncertain";
-      this.launch.detail = "The dashboard lost track of its own tab; no tab is changed.";
       return;
     }
     if (isDashboardUrl(dash.url, this.origin)) {
@@ -572,9 +621,16 @@ export class Dashboard {
     // Confirm on a fresh list right before restoring.
     await this.list();
     const again = this.tabs.find((tab) => tab.id === this.dashTabId);
-    if (!again || !again.current || isDashboardUrl(again.url, this.origin)) return;
+    if (!again || isDashboardUrl(again.url, this.origin)) return;
     bindClaims(this.claims, this.tabs, this.bindings, (tab) => this.showsDashboard(tab));
     if (this.claimedTabIds().has(again.id)) return;
+    const target = await this.focusTab(again.id);
+    if (!target) {
+      this.launch.status = "uncertain";
+      this.launch.detail = "The dashboard could not select its own tab; no tab is changed.";
+      return;
+    }
+    if (isDashboardUrl(target.url, this.origin)) return;
     await this.session.callTool("browser_navigate", { url: this.dashboardUrl });
     await this.list();
     this.launch.restores.push(Date.now());
@@ -594,62 +650,78 @@ export class Dashboard {
     this.lease = readLease(this.options.runtimeRoot, now);
     this.lastPollUtc = new Date(now).toISOString();
 
-    if (!this.session) {
-      const running = browserRunning(this.options.profile);
-      this.browser.running = running;
-      if (this.options.attach === "when-running" && running === false) {
-        // No browser, so a stale session holds nothing open; close it now.
-        await this.closeStaleSession();
-        this.launch.status = "detached";
-        this.launch.detail = "The browser is not running. The dashboard attaches when an agent starts it.";
-        this.tabs = [];
-        this.mcp.reachable = await this.probeMcp();
-        return;
-      }
-      const session = new McpSession(this.options.mcpPort);
-      try {
-        await session.initialize();
-      } catch (error) {
-        this.mcp = { reachable: false, version: null, error: String(error.message || error).slice(0, 200) };
-        this.launch.status = "detached";
-        this.launch.detail = "The shared service is not answering.";
-        return;
-      }
-      this.session = session;
-      this.rememberSession(session.sessionId);
-      // Close the previous run's session only after this one is open, so the
-      // service never sees zero clients and closes the browser in between.
+    // Any tool call starts the browser, so look before every poll. A browser
+    // that is not running was closed, by the service or by a person, and
+    // stays closed until an agent needs it.
+    const running = browserRunning(this.options.profile);
+    this.browser.running = running;
+    if (running === false) {
+      const wasAttached = this.browser.attached || this.dashTabId !== null;
+      this.forgetBrowser();
+      this.instance = null;
+      this.failures = 0;
+      // A leftover session would start the browser again on its next call
+      // and hold it open; close it now.
       await this.closeStaleSession();
-      this.mcp = { reachable: true, version: session.serverInfo?.version || null, error: null };
-      this.browser.attached = true;
-      this.failures = 0;
-    }
-
-    try {
-      await this.list();
-      this.failures = 0;
-      this.mcp.error = null;
-      this.browser.running = true;
-    } catch (error) {
-      this.failures++;
-      this.mcp.error = String(error.message || error).slice(0, 200);
-      const gone = error.status === 404 || /closed|disconnected|ECONNREFUSED|ECONNRESET/i.test(this.mcp.error);
-      if (error.status === 404 || this.failures >= this.options.failuresBeforeReconnect || gone) {
-        await this.resetSession(error.status !== 404);
-        this.launch.status = "detached";
-        this.launch.detail = "Reconnecting to the shared service.";
-      }
+      if (wasAttached) this.event("browser-closed", DETAIL_CLOSED);
+      this.launch.status = "detached";
+      if (wasAttached) this.launch.detail = DETAIL_CLOSED;
+      else if (this.launch.detail !== DETAIL_CLOSED) this.launch.detail = DETAIL_NOT_RUNNING;
+      this.launch.drifted_since_utc = null;
+      this.launch.drifted_to = null;
+      this.mcp.reachable = await this.probeMcp();
       return;
     }
+    // A different browser process owns the profile: its tabs are new.
+    const instance = browserInstance(this.options.profile);
+    if (instance !== null && this.instance !== null && instance !== this.instance) this.forgetBrowser();
+    this.instance = instance;
 
-    bindClaims(this.claims, this.tabs, this.bindings, (tab) => this.showsDashboard(tab));
     try {
-      if (this.dashTabId === null) await this.establishLaunchTab();
-      else await this.checkLaunchTab();
+      await this.openSession();
     } catch (error) {
-      this.mcp.error = String(error.message || error).slice(0, 200);
+      this.mcp = { reachable: false, version: null, error: String(error.message || error).slice(0, 200) };
+      this.browser.attached = false;
+      this.launch.status = "detached";
+      this.launch.detail = "The shared service is not answering.";
+      return;
     }
-    bindClaims(this.claims, this.tabs, this.bindings, (tab) => this.showsDashboard(tab));
+    try {
+      this.mcp = { reachable: true, version: this.session.serverInfo?.version || null, error: this.mcp.error };
+      try {
+        await this.list();
+        this.failures = 0;
+        this.mcp.error = null;
+        this.browser.running = true;
+        this.browser.attached = true;
+      } catch (error) {
+        this.failures++;
+        this.mcp.error = String(error.message || error).slice(0, 200);
+        if (this.failures >= this.options.failuresBeforeReconnect) {
+          this.forgetBrowser();
+          this.launch.status = "detached";
+          this.launch.detail = "The dashboard cannot list the browser's tabs.";
+        }
+        return;
+      }
+      // Close a session a killed run left behind only once this poll's
+      // session is a client, so closing it never closes and restarts the
+      // browser in between.
+      await this.closeStaleSession();
+
+      bindClaims(this.claims, this.tabs, this.bindings, (tab) => this.showsDashboard(tab));
+      try {
+        if (this.dashTabId === null) await this.establishLaunchTab();
+        else await this.checkLaunchTab();
+      } catch (error) {
+        this.mcp.error = String(error.message || error).slice(0, 200);
+      }
+      bindClaims(this.claims, this.tabs, this.bindings, (tab) => this.showsDashboard(tab));
+    } finally {
+      // The dashboard never stays a client between polls, so the browser
+      // closes when the last agent's session goes away.
+      await this.endSession();
+    }
   }
 
   async probeMcp() {
@@ -713,7 +785,6 @@ export class Dashboard {
         dashboard_url: this.dashboardUrl,
         dashboard_uptime_seconds: Math.round((now - this.startedAt) / 1000),
         poll_ms: this.options.pollMs,
-        attach: this.options.attach,
         last_poll_utc: this.lastPollUtc,
         last_error: this.mcp.error,
       },
@@ -756,10 +827,7 @@ export class Dashboard {
     clearTimeout(this.timer);
     for (const res of this.listeners) res.end();
     this.listeners.clear();
-    if (this.session) {
-      await this.session.close();
-      this.rememberSession(null);
-    }
+    await this.endSession();
   }
 }
 
@@ -963,11 +1031,13 @@ function intOption(value, name, min, max) {
   return parsed;
 }
 
+const KNOWN_OPTIONS = new Set(["runtime-root", "mcp-port", "port", "profile", "node-pid-file", "mcp-cli", "poll-ms", "restore-grace-ms"]);
+
 export function parseOptions(argv, env = process.env) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
     const match = argv[i].match(/^--([a-z-]+)(?:=(.*))?$/);
-    if (!match) throw new Error(`Unexpected argument: ${argv[i]}`);
+    if (!match || !KNOWN_OPTIONS.has(match[1])) throw new Error(`Unexpected argument: ${argv[i]}`);
     args[match[1]] = match[2] !== undefined ? match[2] : argv[++i];
   }
   const runtimeRoot = path.resolve(args["runtime-root"] || defaultRuntimeRoot());
@@ -980,10 +1050,7 @@ export function parseOptions(argv, env = process.env) {
     mcpCli: args["mcp-cli"] ? path.resolve(args["mcp-cli"]) : path.join(runtimeRoot, "package", "node_modules", "@playwright", "mcp", "cli.js"),
     pollMs: intOption(args["poll-ms"] ?? env.PLAYWRIGHT_MCP_SHARED_DASHBOARD_POLL_MS ?? DEFAULTS.pollMs, "--poll-ms", 100, 600000),
     restoreGraceMs: intOption(args["restore-grace-ms"] ?? env.PLAYWRIGHT_MCP_SHARED_DASHBOARD_RESTORE_GRACE_MS ?? DEFAULTS.restoreGraceMs, "--restore-grace-ms", 0, 86400000),
-    attach: args.attach || env.PLAYWRIGHT_MCP_SHARED_DASHBOARD_ATTACH || DEFAULTS.attach,
   };
-  if (!["when-running", "always"].includes(options.attach))
-    throw new Error("--attach must be when-running or always.");
   if (options.port === options.mcpPort) throw new Error("--port must differ from --mcp-port.");
   return options;
 }

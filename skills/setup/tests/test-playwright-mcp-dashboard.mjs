@@ -2,7 +2,9 @@
 // the parts of the shared Playwright MCP server the dashboard relies on: one
 // shared page list, a current-tab pointer per session that starts at the
 // first page, the pointer moving to a neighbour when its page closes, and
-// "Session not found" after a restart.
+// "Session not found" after a restart. It counts sessions opened and deleted,
+// so the tests can check that the dashboard never stays a client between
+// polls and never calls a tool while no browser owns the profile.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -73,6 +75,8 @@ class FakeService {
     this.pages = [];
     this.sessions = new Map();
     this.calls = [];
+    this.created = 0;
+    this.deleted = 0;
     this.nextPage = 1;
     this.serverName = "fake";
   }
@@ -136,7 +140,7 @@ class FakeService {
       req.on("end", () => {
         const sessionId = req.headers["mcp-session-id"];
         if (req.method === "DELETE") {
-          this.sessions.delete(sessionId);
+          if (this.sessions.delete(sessionId)) this.deleted++;
           res.writeHead(200);
           res.end();
           return;
@@ -144,6 +148,7 @@ class FakeService {
         const message = JSON.parse(body);
         if (message.method === "initialize") {
           const id = randomUUID();
+          this.created++;
           this.sessions.set(id, { current: this.pages[0] });
           res.writeHead(200, { "content-type": "text/event-stream", "mcp-session-id": id });
           res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-03-26", serverInfo: { name: "Playwright", version: "0.0.0-fake" }, capabilities: {} } })}\n\n`);
@@ -222,6 +227,11 @@ async function waitFor(port, predicate, description, timeoutMs = 10000) {
   throw new Error(`Timed out waiting for ${description}. Last state: ${JSON.stringify(last)}. Dashboard stderr: ${children.map((c) => c.stderrText || "").join(" | ")}`);
 }
 
+async function exitCode(child) {
+  if (child.exitCode !== null) return child.exitCode;
+  return await new Promise((resolve) => child.once("exit", (code) => resolve(code)));
+}
+
 function startDashboard(args) {
   const child = spawn(process.execPath, [dashboardScript, ...args], { stdio: ["ignore", "ignore", "pipe"] });
   child.stderr.setEncoding("utf8");
@@ -273,33 +283,48 @@ try {
   const common = ["--runtime-root", tempRoot, "--mcp-port", String(mcpPort), "--port", String(dashPort), "--profile", profile, "--poll-ms", "150"];
 
   try {
-    // 1. Attach only while a browser owns the profile.
+    // 0. The removed --attach option is refused.
+    const refused = startDashboard([...common, "--attach", "always"]);
+    assert((await exitCode(refused)) === 64, "The dashboard accepted the removed --attach option.");
+    console.log("PASS: The removed --attach option is refused.");
+
+    // 1. Attach only while a browser owns the profile, and never stay a
+    // client between polls.
     fake.open("about:blank");
-    let dashboard = startDashboard([...common, "--attach", "when-running"]);
+    let dashboard = startDashboard(common);
     let s = await waitFor(dashPort, (x) => Boolean(x.service.last_poll_utc), "first poll");
     await sleep(600);
-    assert(fake.sessions.size === 0, "The dashboard connected while no browser owned the profile.");
+    assert(fake.created === 0 && fake.calls.length === 0, "The dashboard connected while no browser owned the profile.");
     s = await state(dashPort);
     assert(s.launch_tab.status === "detached" && s.service.mcp_reachable === true, `Detached state wrong: ${JSON.stringify(s.launch_tab)}`);
-    const release = await holdBrowserLock(profile);
+    assert(s.launch_tab.detail === lib.DETAIL_NOT_RUNNING && s.service.attach === undefined, `Detached detail wrong: ${JSON.stringify(s)}`);
+    let release = await holdBrowserLock(profile);
     s = await waitFor(dashPort, (x) => x.launch_tab.status === "dashboard", "attach once the browser runs");
-    await release();
     assert(fake.pages.length === 1 && lib.isDashboardUrl(fake.pages[0].url, `http://127.0.0.1:${dashPort}`), `The launch tab does not show the dashboard: ${JSON.stringify(fake.pages)}`);
     assert(s.tabs.length === 1 && s.tabs[0].is_dashboard && s.tabs[0].index === 0, "The dashboard is not marked as tab 0.");
     assert(!fake.pages.some((page) => page.url === "about:blank"), "A blank tab remained.");
     console.log("PASS: The dashboard waits for a running browser, then shows itself in the blank launch tab without opening another tab.");
-    // A hard kill cannot close the MCP session; the next run must.
-    const killedSession = [...fake.sessions.keys()][0];
+    const createdAt = fake.created;
+    await sleep(1000);
+    assert(fake.created >= createdAt + 3, `The dashboard did not poll with a session per poll: ${fake.created - createdAt} sessions in 1 s.`);
+    assert(fake.created - fake.deleted <= 1, `The dashboard kept sessions open: ${fake.created} opened, ${fake.deleted} deleted.`);
     await stopChild(dashboard);
+    assert(fake.sessions.size === 0, "The dashboard left a session open after it stopped.");
+    console.log("PASS: The dashboard opens one session per poll and deletes it, so it never holds the browser open.");
 
-    // 2. Restart of the dashboard adopts the existing dashboard tab.
+    // 2. A session a killed run left behind is closed, and a restarted
+    // dashboard adopts the existing dashboard tab.
+    const killedSession = randomUUID();
+    fake.sessions.set(killedSession, { current: fake.pages[0] });
+    fs.mkdirSync(path.join(tempRoot, "state"), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, "state", "dashboard-session.json"), JSON.stringify({ mcp_port: mcpPort, session_id: killedSession }));
     const callsBefore = fake.calls.length;
-    dashboard = startDashboard([...common, "--attach", "always", "--restore-grace-ms", "800"]);
+    dashboard = startDashboard([...common, "--restore-grace-ms", "800"]);
     s = await waitFor(dashPort, (x) => x.launch_tab.status === "dashboard", "re-adoption");
     await sleep(400);
     assert(fake.pages.length === 1, "A dashboard restart opened another tab.");
-    assert(!fake.calls.slice(callsBefore).some((call) => call.name === "browser_navigate"), "A dashboard restart re-navigated the launch tab.");
-    assert(!fake.sessions.has(killedSession) && fake.sessions.size === 1, "The previous run's MCP session was not closed.");
+    assert(!fake.calls.slice(callsBefore).some((call) => call.name === "browser_navigate" || call.args.action === "select"), "A dashboard restart re-navigated or selected the launch tab.");
+    assert(!fake.sessions.has(killedSession), "The previous run's MCP session was not closed.");
     console.log("PASS: A restarted dashboard closes the session its predecessor left behind and adopts the existing dashboard tab without navigating or opening tabs.");
 
     // 3. Claims join the right tabs, survive navigation, expire, and release.
@@ -370,7 +395,8 @@ try {
     // re-adopts its tab without creating another.
     fake.restart();
     const before = fake.pages.length;
-    await waitFor(dashPort, (x) => x.service.mcp_reachable && x.launch_tab.status === "dashboard" && fake.sessions.size === 1, "reconnect");
+    const createdBeforeRestart = fake.created;
+    await waitFor(dashPort, (x) => x.service.mcp_reachable && x.launch_tab.status === "dashboard" && fake.created >= createdBeforeRestart + 2, "reconnect");
     await sleep(500);
     assert(fake.pages.length === before, `Reconnecting opened another tab. pages=${JSON.stringify(fake.pages)} calls=${JSON.stringify(fake.calls.slice(-8))}`);
     console.log("PASS: After a service restart the dashboard reconnects and re-adopts its tab.");
@@ -390,7 +416,36 @@ try {
     assert(dashPage.url === fightUrl && !lib.isDashboardUrl(fightUrl, `http://127.0.0.1:${dashPort}`), "Restore was not paused after repeated drift.");
     console.log("PASS: Repeated drift pauses automatic restore and flags the launch tab as contested.");
 
-    // 10. HTTP surface.
+    // 10. A person closes the browser: the dashboard detaches and calls no
+    // tool, because any tool call would start the browser again.
+    // A poll already past its browser check when the lock goes may finish;
+    // the next poll must not call the service.
+    await release();
+    s = await waitFor(dashPort, (x) => x.launch_tab.status === "detached" && x.launch_tab.detail === lib.DETAIL_CLOSED, "detached after the browser closed");
+    await sleep(300);
+    fake.pages = [];
+    for (const session of fake.sessions.values()) session.current = undefined;
+    s = await state(dashPort);
+    assert(s.tabs.length === 0 && s.browser.running === false && s.browser.attached === false, `Closed-browser state wrong: ${JSON.stringify(s.browser)}`);
+    const quietCalls = fake.calls.length;
+    const quietCreated = fake.created;
+    await sleep(1200);
+    assert(fake.calls.length === quietCalls && fake.created === quietCreated && fake.pages.length === 0, `The dashboard called the service after the browser closed, which would start it again: ${JSON.stringify(fake.calls.slice(quietCalls))} created=${fake.created - quietCreated} pages=${fake.pages.length}`);
+    s = await state(dashPort);
+    assert(s.launch_tab.status === "detached" && s.launch_tab.detail === lib.DETAIL_CLOSED, "The closed-browser status did not hold.");
+    console.log("PASS: When a person closes the browser, the dashboard detaches, makes no tool call, and the browser stays closed.");
+
+    // 11. An agent's tool call starts the browser again with one blank launch
+    // tab; the dashboard takes it without opening another tab.
+    fake.open("about:blank");
+    fake.open("http://app.test/agent", "Agent");
+    release = await holdBrowserLock(profile);
+    s = await waitFor(dashPort, (x) => x.launch_tab.status === "dashboard" && x.tabs[0]?.is_dashboard, "dashboard back in the launch tab");
+    assert(fake.pages.length === 2 && lib.isDashboardUrl(fake.pages[0].url, `http://127.0.0.1:${dashPort}`) && fake.pages[1].url === "http://app.test/agent", `Tabs after the relaunch: ${JSON.stringify(fake.pages)}`);
+    assert(!fake.pages.some((page) => page.url === "about:blank"), "A blank tab remained after the relaunch.");
+    console.log("PASS: After an agent starts the browser again, the dashboard takes the new launch tab with no extra blank tab.");
+
+    // 12. HTTP surface.
     const forbidden = await get(dashPort, "/api/state", "attacker.example");
     assert(forbidden.status === 403, "A non-loopback Host header was served.");
     const page = await get(dashPort, "/");
@@ -400,6 +455,7 @@ try {
     console.log("PASS: The page is self-contained, labelled for agents, and refused to non-loopback Host headers.");
 
     await stopChild(dashboard);
+    await release();
   } finally {
     mcpServer.close();
   }

@@ -12,9 +12,7 @@ param(
     # Loopback port of the live dashboard shown in the launch tab: -1 uses
     # PLAYWRIGHT_MCP_SHARED_DASHBOARD_PORT or 8932, and 0 turns it off.
     [ValidateRange(-1, 65535)]
-    [int]$DashboardPort = -1,
-    [ValidateSet("", "when-running", "always")]
-    [string]$DashboardAttach = ""
+    [int]$DashboardPort = -1
 )
 
 $ErrorActionPreference = "Stop"
@@ -316,9 +314,6 @@ try {
             "--node-pid-file", ('"{0}"' -f $NodePidPath),
             "--mcp-cli", ('"{0}"' -f $McpCli)
         )
-        if (-not [string]::IsNullOrWhiteSpace($DashboardAttach)) {
-            $DashboardArguments += @("--attach", $DashboardAttach)
-        }
         $script:DashboardProcess = Start-Process `
             -FilePath $script:ResolvedNodePath `
             -ArgumentList $DashboardArguments `
