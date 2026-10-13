@@ -582,17 +582,21 @@ const gSkip = existsSync(realCli)
   ? null
   : `no Playwright MCP CLI at ${realCli} (set PLAYWRIGHT_MCP_SHARED_CLI or pass --cli=<path>)`;
 
+// The dashboard half of G needs a dashboard that lets a closed browser stay
+// closed. One that still offers `--attach always` predates that change and
+// reopens Chrome within a poll, so that half is skipped against it.
+const dashboardSource = readText(path.join(scriptsDir, "playwright-mcp-dashboard.mjs"));
+const dashboardOnDemand = !/\["when-running", "always"\]/.test(dashboardSource);
+
 await runCase(
-  "G",
+  "G1",
   "browser starts on demand and a closed browser stays closed",
   async () => {
-    const runtime = makeRuntime("g", { stub: false });
+    const runtime = makeRuntime("g1", { stub: false });
     const port = await freePort();
-    const dashboardPort = await freePort();
-    const endpoint = `http://127.0.0.1:${port}/mcp`;
+    const endpoint = `http://localhost:${port}/mcp`;
 
-    // G1: service without the dashboard.
-    let launcher = startLauncher(runtime, port, ["-McpCli", realCli, "-RestartDelaySeconds", "0"]);
+    const launcher = startLauncher(runtime, port, ["-McpCli", realCli, "-RestartDelaySeconds", "0"]);
     const agent = new HttpMcpClient(endpoint, "linux-autostart-agent");
     try {
       await waitForService(runtime, port);
@@ -613,9 +617,20 @@ await runCase(
       await stopChild(launcher);
     }
     await waitFor(() => chromePids(runtime.profile).length === 0, 15_000, "Chrome to exit with the service");
+  },
+  gSkip,
+);
 
-    // G2: the same with the dashboard attached.
-    launcher = startLauncher(runtime, port, ["-McpCli", realCli, "-RestartDelaySeconds", "0", "-DashboardPort", String(dashboardPort)]);
+await runCase(
+  "G2",
+  "with the dashboard attached a closed browser stays closed",
+  async () => {
+    const runtime = makeRuntime("g2", { stub: false });
+    const port = await freePort();
+    const dashboardPort = await freePort();
+    const endpoint = `http://localhost:${port}/mcp`;
+
+    const launcher = startLauncher(runtime, port, ["-McpCli", realCli, "-RestartDelaySeconds", "0", "-DashboardPort", String(dashboardPort)]);
     const second = new HttpMcpClient(endpoint, "linux-autostart-agent-2");
     try {
       await waitForService(runtime, port);
@@ -646,8 +661,12 @@ await runCase(
     } finally {
       await stopChild(launcher);
     }
+    await waitFor(() => chromePids(runtime.profile).length === 0, 15_000, "Chrome to exit with the service");
   },
-  gSkip,
+  gSkip ||
+    (dashboardOnDemand
+      ? null
+      : "the bundled dashboard still keeps the browser open (it offers --attach always)"),
 );
 
 // ---- Case H: systemd ---------------------------------------------------------
