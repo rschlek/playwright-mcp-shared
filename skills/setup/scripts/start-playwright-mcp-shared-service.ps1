@@ -40,9 +40,6 @@ if ($Config.Headless -eq $true) {
 if ($null -ne $Config.DashboardPort) {
     $LauncherArguments.DashboardPort = [int]$Config.DashboardPort
 }
-if (-not [string]::IsNullOrWhiteSpace([string]$Config.DashboardAttach)) {
-    $LauncherArguments.DashboardAttach = [string]$Config.DashboardAttach
-}
 
 & $LauncherPath @LauncherArguments
 exit $LASTEXITCODE
