@@ -771,8 +771,9 @@ the claim with the tab-claim helper. Afterward, each client retains an
 independent current-tab pointer while sharing profile state, and checks that
 pointer after any reconnect or idle gap, because a recreated session starts on
 the first tab. A client closes its own tab and releases its claim when its
-browser work is finished; the launch tab, which shows the dashboard, stays open
-and keeps the browser running.
+browser work is finished. The launch tab is the dashboard's page: agents never
+close or navigate it. The browser stays up only while an agent session holds a
+browser backend, and closes once the last agent session ends.
 
 ## 8. Verification
 
