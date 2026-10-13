@@ -1,6 +1,6 @@
 {
   "name": "playwright-mcp-shared",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Set up one loopback-only Playwright MCP service and persistent Chrome profile shared safely by concurrent agent clients.",
   "author": {
     "name": "rschlek"
