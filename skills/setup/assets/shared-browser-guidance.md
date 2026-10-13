@@ -40,8 +40,9 @@ do not loop login or clear state speculatively.
    tabs remain visible in tab lists; never select, navigate, or close them. That
    includes the first tab, the browser's launch tab, which shows the live
    dashboard titled "Shared browser - launch tab": never select, navigate, or
-   close it. It keeps the browser running after sessions close their own tabs
-   and shows which agent is using which tab. Agents that share one MCP
+   close it. It is the dashboard's page and shows which agent is using which
+   tab. The browser stays up only while an agent session holds a browser
+   backend, and closes once the last agent session ends. Agents that share one MCP
    connection, such as a session and the subagents it spawns, share one current
    tab: they take turns on that one claimed tab and do not each claim another.
 3. A session's current tab is not durable. After a reconnect, a tool error, or
