@@ -8,7 +8,13 @@ param(
     [ValidateRange(0, 300)]
     [int]$RestartDelaySeconds = 3,
     [ValidateRange(-1, 1000000)]
-    [int]$MaxRestarts = -1
+    [int]$MaxRestarts = -1,
+    # Loopback port of the live dashboard shown in the launch tab: -1 uses
+    # PLAYWRIGHT_MCP_SHARED_DASHBOARD_PORT or 8932, and 0 turns it off.
+    [ValidateRange(-1, 65535)]
+    [int]$DashboardPort = -1,
+    [ValidateSet("", "when-running", "always")]
+    [string]$DashboardAttach = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -124,6 +130,23 @@ function Test-ManagedNodeProcess {
     )
 }
 
+function Test-ManagedDashboardProcess {
+    # A managed dashboard is node.exe running this launcher's dashboard script
+    # on the configured dashboard port.
+    param([int]$ProcessId, [string]$Script, [int]$TargetPort)
+    if ($ProcessId -le 0) {
+        return $false
+    }
+    $Candidate = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if (-not $Candidate -or $Candidate.Name -ne "node.exe" -or [string]::IsNullOrWhiteSpace($Candidate.CommandLine)) {
+        return $false
+    }
+    return (
+        $Candidate.CommandLine.IndexOf($Script, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $Candidate.CommandLine -match ("--port\s+{0}(\s|$)" -f $TargetPort)
+    )
+}
+
 try {
     if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
         $InstalledRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -213,6 +236,19 @@ try {
         throw "The shared Playwright MCP port must be between 1024 and 65535."
     }
 
+    if ($DashboardPort -lt 0) {
+        if (-not [string]::IsNullOrWhiteSpace($env:PLAYWRIGHT_MCP_SHARED_DASHBOARD_PORT)) {
+            $DashboardPort = [int]$env:PLAYWRIGHT_MCP_SHARED_DASHBOARD_PORT
+        }
+        else {
+            $DashboardPort = 8932
+        }
+    }
+    if ($DashboardPort -ne 0 -and ($DashboardPort -lt 1024 -or $DashboardPort -gt 65535 -or $DashboardPort -eq $Port)) {
+        throw "The dashboard port must be 0 (off) or a port between 1024 and 65535 other than the service port."
+    }
+    $DashboardScript = Join-Path $PSScriptRoot "playwright-mcp-dashboard.mjs"
+
     $OutputsRoot = Join-Path $RuntimeRoot "outputs\shared"
     $LogsRoot = Join-Path $RuntimeRoot "logs"
     $StateRoot = Join-Path $RuntimeRoot "state"
@@ -224,8 +260,77 @@ try {
 
     $PidPath = Join-Path $StateRoot "shared-server.pid"
     $NodePidPath = Join-Path $StateRoot "shared-node.pid"
+    $DashboardPidPath = Join-Path $StateRoot "dashboard.pid"
     $ServerPidWritten = $false
     $OwnNodePid = 0
+    $DashboardProcess = $null
+    $OwnDashboardPid = 0
+    $DashboardNextStart = [DateTime]::MinValue
+    $DashboardBackoffSeconds = 5
+    if ($DashboardPort -ne 0 -and -not [IO.File]::Exists($DashboardScript)) {
+        Write-Bootstrap "dashboard script missing; dashboard disabled"
+        $DashboardPort = 0
+    }
+
+    # Keep the dashboard running beside the node. It reconnects to the service
+    # on its own, so a node restart does not restart it. A dashboard left by a
+    # previous supervisor is adopted like the node.
+    function Ensure-Dashboard {
+        if ($DashboardPort -eq 0) {
+            return
+        }
+        if ($script:DashboardProcess -and -not $script:DashboardProcess.HasExited) {
+            return
+        }
+        if ($script:DashboardProcess) {
+            Write-Bootstrap "dashboard process exited; restarting after $script:DashboardBackoffSeconds seconds"
+            Remove-OwnedPidFile -Path $DashboardPidPath -Value $script:OwnDashboardPid
+            $script:OwnDashboardPid = 0
+            $script:DashboardProcess = $null
+            $script:DashboardNextStart = [DateTime]::UtcNow.AddSeconds($script:DashboardBackoffSeconds)
+            $script:DashboardBackoffSeconds = [Math]::Min(300, $script:DashboardBackoffSeconds * 2)
+            return
+        }
+        if ([DateTime]::UtcNow -lt $script:DashboardNextStart) {
+            return
+        }
+        if ([IO.File]::Exists($DashboardPidPath)) {
+            $RecordedDashboard = 0
+            $null = [int]::TryParse([IO.File]::ReadAllText($DashboardPidPath).Trim(), [ref]$RecordedDashboard)
+            if (Test-ManagedDashboardProcess -ProcessId $RecordedDashboard -Script $DashboardScript -TargetPort $DashboardPort) {
+                $script:DashboardProcess = [Diagnostics.Process]::GetProcessById($RecordedDashboard)
+                $script:OwnDashboardPid = $RecordedDashboard
+                Write-Bootstrap "dashboard process adopted"
+                return
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($script:ResolvedNodePath)) {
+            $script:ResolvedNodePath = Resolve-NodeExecutable -PreferredPath $NodePath
+        }
+        $DashboardArguments = @(
+            ('"{0}"' -f $DashboardScript),
+            "--runtime-root", ('"{0}"' -f $RuntimeRoot),
+            "--mcp-port", [string]$Port,
+            "--port", [string]$DashboardPort,
+            "--profile", ('"{0}"' -f $ProfilePath),
+            "--node-pid-file", ('"{0}"' -f $NodePidPath),
+            "--mcp-cli", ('"{0}"' -f $McpCli)
+        )
+        if (-not [string]::IsNullOrWhiteSpace($DashboardAttach)) {
+            $DashboardArguments += @("--attach", $DashboardAttach)
+        }
+        $script:DashboardProcess = Start-Process `
+            -FilePath $script:ResolvedNodePath `
+            -ArgumentList $DashboardArguments `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $LogsRoot "dashboard.stdout.log") `
+            -RedirectStandardError (Join-Path $LogsRoot "dashboard.stderr.log") `
+            -PassThru
+        $script:OwnDashboardPid = $script:DashboardProcess.Id
+        Write-OwnedPidFile -Path $DashboardPidPath -Value $script:OwnDashboardPid
+        Write-Bootstrap "dashboard process started"
+    }
+
     try {
         $ProfileArgument = $ProfilePath.Replace("\", "/")
         $OutputArgument = $OutputsRoot.Replace("\", "/")
@@ -319,6 +424,10 @@ try {
             try {
                 $OwnNodePid = $NodeProcess.Id
                 Write-OwnedPidFile -Path $NodePidPath -Value $OwnNodePid
+                Ensure-Dashboard
+                while (-not $NodeProcess.WaitForExit(2000)) {
+                    Ensure-Dashboard
+                }
                 $NodeProcess.WaitForExit()
                 $NodeProcess.Refresh()
                 try {
@@ -353,6 +462,10 @@ try {
             Remove-OwnedPidFile -Path $PidPath -Value $PID
         }
         Remove-OwnedPidFile -Path $NodePidPath -Value $OwnNodePid
+        if ($DashboardProcess -and -not $DashboardProcess.HasExited) {
+            Stop-Process -Id $DashboardProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        Remove-OwnedPidFile -Path $DashboardPidPath -Value $OwnDashboardPid
         $LockStream.Dispose()
     }
 }
