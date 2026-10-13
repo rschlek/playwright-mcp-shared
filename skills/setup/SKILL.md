@@ -276,15 +276,21 @@ node <SKILL_DIR>/tests/test-playwright-mcp-dashboard-live.mjs
 Require their PASS results. The claim test races eight claimants and requires
 every claim to land, then checks renewal, release, expiry pruning, URL
 redaction, and input validation. The dashboard test drives the dashboard
-against a scripted MCP service: it attaches only while a browser owns the
-profile, takes the blank launch tab without opening another, joins claims to
+against a scripted MCP service: it calls the service only while a browser owns
+the profile, deletes its session after every poll, detaches without a tool
+call when the browser is closed, refuses the removed `--attach` option, takes
+the blank launch tab without opening another, joins claims to
 the right tabs across navigation, expiry, and release, restores an unclaimed
 launch tab that was navigated away, never takes back a claimed tab or
 navigates the tab its pointer falls to, reconnects after a restart, and refuses
 non-loopback Host headers. The live test repeats the launch-tab, claim,
-expiry, drift, and restart checks against the pinned CLI through the
-supervisor, headless, in a temporary runtime on free ports; it reports SKIP
-without a CLI (set `PLAYWRIGHT_MCP_SHARED_CLI`).
+expiry, drift, and restart checks against the pinned CLI, headless, in a
+temporary runtime on free ports (through the supervisor on Windows; elsewhere
+it starts the node and the dashboard itself), and checks the on-demand
+lifecycle: a closed browser stays closed with the dashboard attached, an
+agent's tool call starts it again and the dashboard takes the new launch tab,
+an idle agent keeps it open, and it closes when the last agent session is
+deleted. It reports SKIP without a CLI (set `PLAYWRIGHT_MCP_SHARED_CLI`).
 
 Run the portable lifecycle tests:
 
@@ -355,19 +361,25 @@ fifteen minutes it stops and flags the tab as contested. If an agent has
 claimed that page, or the tab was closed, the dashboard never touches it and
 reopens itself in a new tab.
 
-Attach mode. By default the dashboard attaches only while a browser owns the
-profile (`when-running`), so it never starts Chrome on its own. While it is
-attached it is a connected client, so the service keeps the browser open after
-the last agent disconnects; closing the browser window detaches it until an
-agent starts the browser again. `always` attaches at startup and so opens the
-browser with the service.
+On-demand browser. The browser starts on an agent's first tool call and the
+service closes it when no agent session is attached. The dashboard never
+starts it and never holds it open: before every poll it checks that a browser
+owns the profile, and each poll uses its own MCP session that it deletes
+before the poll ends. An idle agent that is still connected keeps the browser
+open. When a person closes the browser window, the dashboard detaches and
+reports "The browser was closed. It starts again when an agent needs it.";
+the browser stays closed until an agent's next tool call, and the dashboard
+takes the new blank launch tab. After such a close the first call waits for a
+cold start of a few seconds, a password manager that locks on browser restart
+comes back locked, session-only cookies are gone, and tab indexes and claims
+recorded before the close are stale until their TTL expires. There is no
+option to attach at startup.
 
 Settings, with defaults: installer `-DashboardPort 8932` (0 turns the dashboard
 off; stored as `DashboardPort` in the service configuration, and as
 `dashboard_port` by the portable manager's `--dashboard-port`); launcher
-`-DashboardPort` and `-DashboardAttach`; environment variables
-`PLAYWRIGHT_MCP_SHARED_DASHBOARD_PORT`, `PLAYWRIGHT_MCP_SHARED_DASHBOARD_ATTACH`
-(`when-running`), `PLAYWRIGHT_MCP_SHARED_DASHBOARD_POLL_MS` (5000), and
+`-DashboardPort`; environment variables
+`PLAYWRIGHT_MCP_SHARED_DASHBOARD_PORT`, `PLAYWRIGHT_MCP_SHARED_DASHBOARD_POLL_MS` (5000), and
 `PLAYWRIGHT_MCP_SHARED_DASHBOARD_RESTORE_GRACE_MS` (30000).
 
 ### Tab claims
