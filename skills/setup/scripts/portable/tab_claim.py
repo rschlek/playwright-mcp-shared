@@ -27,21 +27,15 @@ EXIT_MISMATCH = 76
 
 
 def runtime_root() -> Path:
-    override = os.environ.get("PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT") or os.environ.get(
-        "PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT"
-    )
+    override = os.environ.get("PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT")
     if override:
         return Path(override).expanduser().resolve()
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA")
         if not base:
             raise RuntimeError("LOCALAPPDATA is unavailable")
-        canonical = Path(base) / "playwright-mcp-shared"
-        legacy = Path(base) / "legacy-ai" / "playwright-mcp"
-    else:
-        canonical = Path.home() / "Library" / "Application Support" / "playwright-mcp-shared"
-        legacy = Path.home() / "Library" / "Application Support" / "legacy-ai" / "playwright-mcp"
-    return legacy if not canonical.exists() and legacy.exists() else canonical
+        return Path(base) / "playwright-mcp-shared"
+    return Path.home() / "Library" / "Application Support" / "playwright-mcp-shared"
 
 
 def now() -> datetime:

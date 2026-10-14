@@ -64,7 +64,7 @@ for a consistent authenticated experience across agents.
 - Shared behavior asset: `assets/shared-browser-guidance.md`.
 - Password-manager choice and service URL are user-provided configuration. This
   plugin does not prescribe, bundle, or automate a credential provider.
-- Portable lifecycle scripts for macOS preview and earlier installations:
+- Portable lifecycle scripts for macOS preview:
   - `scripts/portable/manage_browser.py`
   - `scripts/portable/browser_service.py`
   - `scripts/portable/auth_lease.py`
@@ -85,9 +85,6 @@ client to it over loopback HTTP.
   6 through 8.
 - On Linux, use the bash lifecycle in "Linux lifecycle" below in place of the
   PowerShell installation steps, then continue with sections 4 and 6 through 8.
-- The portable manager detects the legacy runtime when it exists and the new
-  canonical runtime does not. It continues managing that directory in place so
-  existing cookies and sign-ins are not copied or discarded.
 
 ## Linux lifecycle
 
@@ -298,8 +295,8 @@ Run the portable lifecycle tests:
 python3 -m unittest discover -s tests -p "test_portable_lifecycle.py"
 ```
 
-Require all tests to pass. They preserve the cross-platform lifecycle and
-legacy runtime migration behavior now owned by this repository.
+Require all tests to pass. They preserve the cross-platform lifecycle owned by
+this repository.
 
 On Windows, run the autostart lifecycle test:
 

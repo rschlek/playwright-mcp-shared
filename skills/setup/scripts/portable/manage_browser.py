@@ -18,29 +18,21 @@ PACKAGE_VERSION = "0.0.79"
 DEFAULT_PORT = 8931
 DEFAULT_DASHBOARD_PORT = 8932
 RUN_VALUE = "PlaywrightMCPShared"
-LEGACY_RUN_VALUE = "LegacyPlaywrightMCP"
 MACOS_LABEL = "com.playwright-mcp-shared.service"
-LEGACY_MACOS_LABEL = "com.example.playwright-mcp"
 
 
 def root() -> Path:
-    override = os.environ.get("PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT") or os.environ.get(
-        "PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT"
-    )
+    override = os.environ.get("PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT")
     if override:
         return Path(override).expanduser().resolve()
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA")
         if not base:
             raise RuntimeError("LOCALAPPDATA is unavailable")
-        canonical = Path(base) / "playwright-mcp-shared"
-        legacy = Path(base) / "legacy-ai" / "playwright-mcp"
+        return Path(base) / "playwright-mcp-shared"
     if sys.platform == "darwin":
-        canonical = Path.home() / "Library" / "Application Support" / "playwright-mcp-shared"
-        legacy = Path.home() / "Library" / "Application Support" / "legacy-ai" / "playwright-mcp"
-    if sys.platform not in ("win32", "darwin"):
-        raise RuntimeError("Shared Playwright MCP supports Windows and macOS only")
-    return legacy if not canonical.exists() and legacy.exists() else canonical
+        return Path.home() / "Library" / "Application Support" / "playwright-mcp-shared"
+    raise RuntimeError("Shared Playwright MCP supports Windows and macOS only")
 
 
 def which(names: tuple[str, ...]) -> str | None:
@@ -140,20 +132,18 @@ def remove_autostart() -> None:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                 r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
                                 winreg.KEY_SET_VALUE) as key:
-                for value_name in (RUN_VALUE, LEGACY_RUN_VALUE):
-                    try:
-                        winreg.DeleteValue(key, value_name)
-                    except FileNotFoundError:
-                        pass
+                try:
+                    winreg.DeleteValue(key, RUN_VALUE)
+                except FileNotFoundError:
+                    pass
         except FileNotFoundError:
             pass
     elif sys.platform == "darwin":
-        for label in (MACOS_LABEL, LEGACY_MACOS_LABEL):
-            plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
-            if plist.exists():
-                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)],
-                               capture_output=True)
-                plist.unlink()
+        plist = Path.home() / "Library" / "LaunchAgents" / f"{MACOS_LABEL}.plist"
+        if plist.exists():
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)],
+                           capture_output=True)
+            plist.unlink()
 
 
 def process_command(pid: int) -> str:

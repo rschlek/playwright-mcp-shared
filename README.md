@@ -1,9 +1,5 @@
 # Shared Playwright MCP
 
-The repository remains named `playwright-mcp-shared`; its installable plugin ID
-is `playwright-mcp-shared` so catalogs that already list the plugin keep the same
-command name while consuming this repository directly.
-
 Shared Playwright MCP is a setup and operations plugin for running one
 loopback-only Playwright MCP service that several agent clients can use at the
 same time.
