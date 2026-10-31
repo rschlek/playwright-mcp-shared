@@ -215,8 +215,8 @@ function alive(pid) {
 function profileBrowserPids({ mainOnly = false } = {}) {
   if (windows) {
     const command =
-      "$p=$env:PLAYWRIGHT_SHARED_TEST_PROFILE; Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
-      "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) -and (-not $env:PLAYWRIGHT_SHARED_MAIN_ONLY -or -not $_.CommandLine.Contains('--type=')) } | " +
+      "$p=$env:PLAYWRIGHT_SHARED_TEST_PROFILE; $q=$p.Replace('\\', '/'); Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
+      "Where-Object { $_.CommandLine -and ($_.CommandLine.Contains($p) -or $_.CommandLine.Contains($q)) -and (-not $env:PLAYWRIGHT_SHARED_MAIN_ONLY -or -not $_.CommandLine.Contains('--type=')) } | " +
       "ForEach-Object { $_.ProcessId }";
     const out = execFileSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
       env: { ...process.env, PLAYWRIGHT_SHARED_TEST_PROFILE: profileRoot, PLAYWRIGHT_SHARED_MAIN_ONLY: mainOnly ? "1" : "" },
