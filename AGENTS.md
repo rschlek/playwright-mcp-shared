@@ -1,9 +1,9 @@
 # Agent guidance
 
-<!-- project-guide:base start (0.7.1) -->
+<!-- project-guide:base start (0.9.0) -->
 ## Working in this repo
 
-This repo follows the project-guide standard, version 0.7.1
+This repo follows the project-guide standard, version 0.9.0
 (https://github.com/rschlek/project-guide). This block is replaced when the
 standard updates; put project-specific guidance in the section below it.
 
@@ -26,7 +26,9 @@ standard updates; put project-specific guidance in the section below it.
   in `docs/plan/`, decisions in `docs/decisions.md`. Otherwise write such
   documents only when asked.
 - Never track progress in a document: no checkboxes, status lines, or live
-  handoff files. Read `docs/project-conventions.md` before writing or moving
+  handoff files. A ticket's status lives only in its tracker, the one
+  `project.yaml` names or else the profile's default; never copy tickets
+  between trackers. Read `docs/project-conventions.md` before writing or moving
   anything under `docs/`, and leave existing documents as they are.
 - In a repo other people use, changes go in through its review process,
   not straight to the main branch.
