@@ -7,7 +7,9 @@ param(
     [ValidateRange(0, 65535)]
     [int]$DashboardPort = 8932,
     [switch]$Start,
-    [string]$TaskName = "PlaywrightMCPSharedService",
+    # Name of the current-user scheduled task. Empty means the name this
+    # runtime recorded at its last install, else PlaywrightMCPSharedService.
+    [string]$TaskName = "",
     [string]$RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
     [string]$RunValueName = "PlaywrightMCPShared",
     [ValidateRange(1, 1440)]
@@ -145,12 +147,35 @@ if ($DashboardPort -ne 0 -and ($DashboardPort -lt 1024 -or $DashboardPort -eq $P
 $StateRoot = Join-Path $RuntimeRoot "state"
 $null = [IO.Directory]::CreateDirectory($StateRoot)
 $ServiceConfigPath = Join-Path $StateRoot "windows-service-config.json"
+
+# The task name is recorded with the runtime, so a later install of the same
+# runtime re-registers the same task instead of adding a second one.
+$RecordedTaskName = ""
+if ([IO.File]::Exists($ServiceConfigPath)) {
+    try {
+        $RecordedTaskName = [string](Get-Content -LiteralPath $ServiceConfigPath -Raw | ConvertFrom-Json).TaskName
+    }
+    catch {
+        $RecordedTaskName = ""
+    }
+}
+if ([string]::IsNullOrWhiteSpace($TaskName)) {
+    $TaskName = $(if (-not [string]::IsNullOrWhiteSpace($RecordedTaskName)) { $RecordedTaskName } else { "PlaywrightMCPSharedService" })
+}
+if ($TaskName -notmatch '^[A-Za-z0-9 ._-]{1,200}$') {
+    throw "The task name may contain only letters, digits, spaces, and . _ -."
+}
+if (-not [string]::IsNullOrWhiteSpace($RecordedTaskName) -and $RecordedTaskName -ne $TaskName) {
+    [Console]::Error.WriteLine("This runtime was registered as task '$RecordedTaskName'. That task is left in place; unregister it once '$TaskName' runs.")
+}
+
 $ServiceConfig = [ordered]@{
     RuntimeRoot = $RuntimeRoot
     ProfilePath = $ProfilePath
     NodePath = $NodePath
     Port = $Port
     DashboardPort = $DashboardPort
+    TaskName = $TaskName
 } | ConvertTo-Json
 [IO.File]::WriteAllText(
     $ServiceConfigPath,

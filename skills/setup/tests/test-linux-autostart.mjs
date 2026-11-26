@@ -468,6 +468,34 @@ await runCase("U", "installer unit (stand-in systemctl)", async () => {
   const log = readText(calls);
   assert(log.includes(`enable ${unitName}`) && log.includes(`restart ${unitName}`), `unexpected systemctl calls:\n${log}`);
   assert(!log.includes("playwright-mcp-shared"), "the installer addressed the default unit");
+
+  // A later install of the same runtime without -UnitName keeps the recorded
+  // unit instead of adding a second, default-named one.
+  writeFileSync(calls, "");
+  const again = runSync(
+    "bash",
+    [runtime.installer, "-RuntimeRoot", runtime.root, "-Port", "18931", "-DashboardPort", "18932"],
+    { env: { XDG_CONFIG_HOME: configHome, PATH: `${shim}:${process.env.PATH}`, DISPLAY: "", WAYLAND_DISPLAY: "" } },
+  );
+  assert(again.code === 0, `re-install exit ${again.code}: ${again.stderr}`);
+  assert(!existsSync(path.join(configHome, "systemd", "user", "playwright-mcp-shared.service")), "the re-install wrote the default unit");
+  const againConfig = JSON.parse(readText(path.join(runtime.root, "state", "linux-service-config.json")));
+  assert(againConfig.UnitName === unitName, `the re-install recorded unit ${againConfig.UnitName}`);
+  const againLog = readText(calls);
+  assert(againLog.includes(`enable ${unitName}`) && !againLog.includes("playwright-mcp-shared"), `unexpected systemctl calls:\n${againLog}`);
+
+  // A different name is used and recorded; the earlier unit is named, not removed.
+  const renamed = `${unitName}-renamed`;
+  const rename = runSync(
+    "bash",
+    [runtime.installer, "-RuntimeRoot", runtime.root, "-Port", "18931", "-DashboardPort", "18932", "-UnitName", renamed],
+    { env: { XDG_CONFIG_HOME: configHome, PATH: `${shim}:${process.env.PATH}`, DISPLAY: "", WAYLAND_DISPLAY: "" } },
+  );
+  assert(rename.code === 0, `renamed install exit ${rename.code}: ${rename.stderr}`);
+  assert(rename.stderr.includes(`'${unitName}'`), `the renamed install did not name the earlier unit: ${rename.stderr}`);
+  assert(existsSync(path.join(configHome, "systemd", "user", `${unitName}.service`)), "the renamed install removed the earlier unit");
+  const renamedConfig = JSON.parse(readText(path.join(runtime.root, "state", "linux-service-config.json")));
+  assert(renamedConfig.UnitName === renamed, `the renamed install recorded unit ${renamedConfig.UnitName}`);
 });
 
 // ---- Case G: the real CLI, on demand -------------------------------------

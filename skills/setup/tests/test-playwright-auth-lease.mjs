@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,12 +23,12 @@ const launcherPrefix = isWindows
   : [];
 const tempRoot = await mkdtemp(path.join(tmpdir(), "playwright-auth-lease-"));
 
-function runLease(args) {
+function runLease(args, { script = leaseScript, runtimeRoot = tempRoot, env } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       launcherProgram,
-      [...launcherPrefix, leaseScript, "-RuntimeRoot", tempRoot, ...args],
-      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+      [...launcherPrefix, script, ...(runtimeRoot ? ["-RuntimeRoot", runtimeRoot] : []), ...args],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, ...(env ? { env } : {}) },
     );
     let stdout = "";
     let stderr = "";
@@ -128,8 +128,50 @@ try {
     successor.payload.lease_id,
   ]);
 
+  // An installed copy run without -RuntimeRoot uses the lease of the runtime it
+  // lives in, whatever that runtime is named; the environment override wins.
+  // The default root is pointed into the temporary directory, so a fallback
+  // would never touch a real installation.
+  const installedRoot = path.join(tempRoot, "installed-under-another-name");
+  const installedScript = path.join(installedRoot, "bin", path.basename(leaseScript));
+  await mkdir(path.join(installedRoot, "bin"), { recursive: true });
+  await mkdir(path.join(installedRoot, "state"), { recursive: true });
+  await copyFile(leaseScript, installedScript);
+  await writeFile(
+    path.join(installedRoot, "state", isWindows ? "windows-service-config.json" : "linux-service-config.json"),
+    "{}",
+  );
+  const fallbackHome = path.join(tempRoot, "default-home");
+  const isolatedEnv = { ...process.env, LOCALAPPDATA: fallbackHome, XDG_DATA_HOME: fallbackHome };
+  delete isolatedEnv.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT;
+  const installed = await runLease(["-Action", "Acquire", "-Owner", "test-installed", "-TtlSeconds", "60"], {
+    script: installedScript,
+    runtimeRoot: null,
+    env: isolatedEnv,
+  });
+  if (installed.code !== 0 || installed.payload.acquired !== true)
+    throw new Error(`Installed copy did not acquire its own lease: ${JSON.stringify(installed)}`);
+  if (!(await stat(path.join(installedRoot, "locks", "auth-flow.json")).catch(() => null)))
+    throw new Error("Installed copy did not use the lease of the runtime it lives in.");
+  if (await stat(path.join(fallbackHome, "playwright-mcp-shared")).catch(() => null))
+    throw new Error("Installed copy fell back to the default runtime root.");
+  await runLease(["-Action", "Release", "-LeaseId", installed.payload.lease_id], {
+    script: installedScript,
+    runtimeRoot: null,
+    env: isolatedEnv,
+  });
+
+  const overrideRoot = path.join(tempRoot, "override-root");
+  const overridden = await runLease(["-Action", "Status"], {
+    script: installedScript,
+    runtimeRoot: null,
+    env: { ...isolatedEnv, PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT: overrideRoot },
+  });
+  if (overridden.code !== 0 || !(await stat(path.join(overrideRoot, "locks")).catch(() => null)))
+    throw new Error(`PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT was not honoured: ${JSON.stringify(overridden)}`);
+
   console.log(
-    "PASS: Eight concurrent authentication contenders produced one lease holder, protected release, renewal, and clean handoff.",
+    "PASS: Eight concurrent authentication contenders produced one lease holder, protected release, renewal, and clean handoff; an installed copy finds its own runtime.",
   );
 } finally {
   await rm(tempRoot, { recursive: true, force: true });

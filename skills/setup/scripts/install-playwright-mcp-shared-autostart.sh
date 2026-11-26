@@ -29,7 +29,9 @@ PORT=8931
 # Loopback port of the live dashboard shown in the launch tab; 0 turns it off.
 DASHBOARD_PORT=8932
 START=0
-UNIT_NAME="playwright-mcp-shared"
+# Empty means the unit name this runtime recorded at its last install, else
+# playwright-mcp-shared.
+UNIT_NAME=""
 
 die() {
     printf '%s\n' "Shared Playwright MCP autostart install failed: $1" >&2
@@ -49,11 +51,6 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-case "$UNIT_NAME" in
-    ''|*[!A-Za-z0-9_.@-]*) die "The unit name may contain only letters, digits, and _ . @ -." ;;
-esac
-UNIT_NAME="${UNIT_NAME%.service}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || die "Cannot resolve the installer directory."
 if [ -z "$RUNTIME_ROOT" ]; then
     INSTALLED_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -71,6 +68,23 @@ if [ -z "$RUNTIME_ROOT" ]; then
     fi
 fi
 case "$RUNTIME_ROOT" in /*) ;; *) RUNTIME_ROOT="$PWD/$RUNTIME_ROOT" ;; esac
+
+# The unit name is recorded with the runtime, so a later install of the same
+# runtime rewrites the same unit instead of adding a second one.
+RECORDED_UNIT_NAME=""
+if [ -f "$RUNTIME_ROOT/state/linux-service-config.json" ]; then
+    RECORDED_UNIT_NAME="$(sed -n "s/^[[:space:]]*\"UnitName\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*\$/\1/p" \
+        "$RUNTIME_ROOT/state/linux-service-config.json" | head -n 1)"
+fi
+[ -n "$UNIT_NAME" ] || UNIT_NAME="$RECORDED_UNIT_NAME"
+[ -n "$UNIT_NAME" ] || UNIT_NAME="playwright-mcp-shared"
+case "$UNIT_NAME" in
+    *[!A-Za-z0-9_.@-]*) die "The unit name may contain only letters, digits, and _ . @ -." ;;
+esac
+UNIT_NAME="${UNIT_NAME%.service}"
+if [ -n "$RECORDED_UNIT_NAME" ] && [ "${RECORDED_UNIT_NAME%.service}" != "$UNIT_NAME" ]; then
+    printf '%s\n' "This runtime was installed as unit '$RECORDED_UNIT_NAME'. That unit is left in place; disable it once '$UNIT_NAME' runs." >&2
+fi
 
 [ -n "$PROFILE_PATH" ] || PROFILE_PATH="$RUNTIME_ROOT/profiles/shared"
 case "$PROFILE_PATH" in /*) ;; *) PROFILE_PATH="$PWD/$PROFILE_PATH" ;; esac

@@ -38,10 +38,13 @@ const headless = hasFlag("headless");
 if (discardOnExit && !nonInteractive)
   throw new Error("Interactive canaries require the explicit DISCARD confirmation.");
 
-const runtimeRoot = isWindows
-  ? path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared")
-  : process.env.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT ||
-    path.join(process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share"), "playwright-mcp-shared");
+// The managed runtime is only read here, for its pinned CLI.
+const runtimeRoot =
+  option("runtime-root") ||
+  process.env.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT ||
+  (isWindows
+    ? path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared")
+    : path.join(process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share"), "playwright-mcp-shared"));
 const mcpCli =
   option("mcp-cli") ||
   path.join(runtimeRoot, "package", "node_modules", "@playwright", "mcp", "cli.js");
