@@ -1,9 +1,9 @@
 # Agent guidance
 
-<!-- playbook:base start (1.0.1) -->
+<!-- playbook:base start (1.0.3) -->
 ## Working in this repo
 
-This repo follows the playbook standard, version 1.0.1
+This repo follows the playbook standard, version 1.0.3
 (https://github.com/rschlek/playbook). This block is replaced when the
 standard updates; put project-specific guidance in the section below it.
 
@@ -37,7 +37,7 @@ standard updates; put project-specific guidance in the section below it.
   `research`, `prototype`, `grill-me`); plan and file the work
   (`to-tickets`); do each ticket (`tackle`); close the parent. Skip steps
   already clear. Any time: `capture` a stray item, `untangle` when lost,
-  `next` when unsure what comes next.
+  `guide-me` when unsure what comes next.
 - In a repo other people use, changes go in through its review process,
   not straight to the main branch.
 - Keep work in progress in a worktree under `.claude/worktrees/`, one
