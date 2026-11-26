@@ -23,10 +23,11 @@ function target(raw) {
 }
 
 const endpoint = option("endpoint") || "http://localhost:8931/mcp";
-const defaultRuntimeRoot = isWindows
-  ? path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared")
-  : process.env.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT ||
-    path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "playwright-mcp-shared");
+const defaultRuntimeRoot =
+  process.env.PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT ||
+  (isWindows
+    ? path.join(process.env.LOCALAPPDATA, "playwright-mcp-shared")
+    : path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "playwright-mcp-shared"));
 const runtimeRoot = option("runtime-root") || defaultRuntimeRoot;
 const specPath = option("spec");
 if (!specPath) throw new Error("Pass a service-neutral probe specification with --spec=<path>.");

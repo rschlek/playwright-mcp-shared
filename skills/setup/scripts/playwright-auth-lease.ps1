@@ -70,10 +70,21 @@ function Write-LeaseState {
 
 try {
     if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
-        if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-            throw "LOCALAPPDATA is unavailable."
+        $InstalledRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+        if (-not [string]::IsNullOrWhiteSpace($env:PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT)) {
+            $RuntimeRoot = $env:PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT
         }
-        $RuntimeRoot = Join-Path $env:LOCALAPPDATA "playwright-mcp-shared"
+        elseif ((Split-Path -Leaf $PSScriptRoot) -eq "bin" -and
+            [IO.File]::Exists((Join-Path $InstalledRoot "state\windows-service-config.json"))) {
+            # An installed copy uses the lease of the runtime it lives in.
+            $RuntimeRoot = $InstalledRoot
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            $RuntimeRoot = Join-Path $env:LOCALAPPDATA "playwright-mcp-shared"
+        }
+        else {
+            throw "LOCALAPPDATA is unavailable and PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT is not set."
+        }
     }
     $RuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot)
     $LocksRoot = Join-Path $RuntimeRoot "locks"

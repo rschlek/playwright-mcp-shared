@@ -42,8 +42,10 @@ for a consistent authenticated experience across agents.
 - Endpoint: `http://localhost:8931/mcp`.
 - Launch-tab dashboard: `http://127.0.0.1:8932/` (JSON at `/api/state`).
 - Bind address: `127.0.0.1`.
-- Current-user scheduled task: `PlaywrightMCPSharedService`.
-- Legacy current-user Run value removed during migration: `PlaywrightMCPShared`.
+- Current-user scheduled task: `PlaywrightMCPSharedService` by default (see
+  "Runtime and startup-entry names").
+- Legacy current-user Run value removed during migration: `PlaywrightMCPShared`
+  by default (installer `-RunValueName`).
 - Bundled scripts, relative to this SKILL.md:
   - `scripts/playwright-mcp-shared.ps1`
   - `scripts/start-playwright-mcp-shared-service.ps1`
@@ -86,6 +88,43 @@ client to it over loopback HTTP.
 - On Linux, use the bash lifecycle in "Linux lifecycle" below in place of the
   PowerShell installation steps, then continue with sections 4 and 6 through 8.
 
+## Runtime and startup-entry names
+
+The runtime folder and the startup entry that starts the service at logon are
+settings. Leave them unset for the defaults; pass them to take over an
+installation made under other names, or to keep one that already uses them.
+
+| Setting | Windows | Linux | Default |
+|---|---|---|---|
+| Runtime folder | `-RuntimeRoot <path>` or `PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT` | `-RuntimeRoot <path>` or `PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT` | `%LOCALAPPDATA%\playwright-mcp-shared`; `${XDG_DATA_HOME:-~/.local/share}/playwright-mcp-shared` |
+| Startup entry | installer `-TaskName <name>` (current-user scheduled task) | installer `-UnitName <name>` (systemd `--user` unit) | `PlaywrightMCPSharedService`; `playwright-mcp-shared` |
+| Earlier Run value to remove | installer `-RunValueName <name>` | none | `PlaywrightMCPShared` |
+
+The profile defaults to `profiles/shared` inside the runtime folder, so an
+installation given its existing runtime folder uses the profile already there.
+Pass `-ProfilePath` only when the profile lives elsewhere. Never copy or merge
+profiles between two runtime folders: a second runtime starts a second, empty
+profile.
+
+What a later run finds without the values:
+
+- The installer records the runtime, profile, port, and startup-entry name in
+  `state/windows-service-config.json` (`TaskName`) or
+  `state/linux-service-config.json` (`UnitName`). Run again for the same
+  runtime without `-TaskName` or `-UnitName`, it re-registers the recorded
+  entry rather than adding a default-named second one. A different name given
+  later is used and recorded; the earlier entry is named in a warning and left
+  in place for the human to remove.
+- An installed copy run from `<RUNTIME>/bin` without `-RuntimeRoot` manages the
+  runtime it lives in: the launcher, installer, stop script, tab-claim helper,
+  and lease helper, on both systems.
+- `playwright-auth-health.mjs` and `playwright-profile-canary.mjs` run from the
+  skill, so they take `--runtime-root=<RUNTIME>` or
+  `PLAYWRIGHT_MCP_SHARED_RUNTIME_ROOT`; without either they use the default
+  folder.
+- Run from the skill rather than the runtime, the scripts cannot tell a
+  non-default installation exists. Preflight step 6 finds it.
+
 ## Linux lifecycle
 
 The bash scripts mirror the PowerShell lifecycle; a systemd `--user` unit
@@ -101,14 +140,16 @@ takes the place of the scheduled task.
   same `npm install --prefix`, then from a terminal in the graphical session
   run `bash <RUNTIME>/bin/install-playwright-mcp-shared-autostart.sh -Start`.
   It accepts `-Port`, `-DashboardPort`, `-ProfilePath`, `-NodePath`, and
-  `-UnitName` (default `playwright-mcp-shared`), records a stable Node.js path,
+  `-UnitName` (default `playwright-mcp-shared`, or the name this runtime
+  recorded at its last install), records a stable Node.js path,
   and imports the session's display variables into the user manager.
 - The unit lives at
-  `${XDG_CONFIG_HOME:-~/.config}/systemd/user/playwright-mcp-shared.service`.
+  `${XDG_CONFIG_HOME:-~/.config}/systemd/user/<UNIT>.service`, where `<UNIT>`
+  is `playwright-mcp-shared` unless `-UnitName` named another.
   It starts with the graphical session (`After=`, `PartOf=`, and `WantedBy=`
   `graphical-session.target`) and restarts with `Restart=always` and
   `RestartSec=5`; an explicit stop or the session ending is never restarted.
-  Logs: `journalctl --user -u playwright-mcp-shared` and
+  Logs: `journalctl --user -u <UNIT>` and
   `logs/shared-server.bootstrap.log`.
 - Supervision matches Windows: the launcher restarts an exited node after
   `-RestartDelaySeconds` (3) up to `-MaxRestarts` (-1, unlimited), adopts a
@@ -122,8 +163,9 @@ takes the place of the scheduled task.
 - Stop: `bash <RUNTIME>/bin/stop-playwright-mcp-shared.sh`. It stops the unit
   only when the unit runs this runtime's launcher, stops the supervisor before
   the node, never signals a recorded PID that now belongs to another program,
-  and fails if the port stays open or the unit comes back. Start again with
-  `systemctl --user start playwright-mcp-shared`.
+  and fails if the port stays open or the unit comes back. It reads the unit
+  name from the service configuration. Start again with
+  `systemctl --user start <UNIT>`.
 - Claims and the lease: `bash <RUNTIME>/bin/playwright-tab-claim.sh` and
   `bash <RUNTIME>/bin/playwright-auth-lease.sh` take the same flags and print
   the same JSON and exit codes as the PowerShell helpers.
@@ -136,8 +178,9 @@ takes the place of the scheduled task.
   Require PASS. With a stub CLI and no browser it proves restart after an
   exit, refusal of a foreign port owner, own-value PID cleanup, adoption of a
   managed node after the supervisor is killed (the node does not hold the
-  singleton lock), a quiet second launch, the stop script, and the unit the
-  installer writes. With the pinned CLI (`PLAYWRIGHT_MCP_SHARED_CLI` or
+  singleton lock), a quiet second launch, the stop script, the unit the
+  installer writes, and that a later install without `-UnitName` keeps the
+  unit name the runtime recorded. With the pinned CLI (`PLAYWRIGHT_MCP_SHARED_CLI` or
   `--cli=<path>`) it also proves the browser starts only on an agent's tool
   call and stays closed after a human closes it; without one those cases
   report SKIP. `--systemd` adds a transient test-only unit that is killed,
@@ -145,6 +188,8 @@ takes the place of the scheduled task.
   health, and canary tests in section 3 also run on Linux.
 
 ## Runtime
+
+The default location; see "Runtime and startup-entry names" for another.
 
 ```text
 %LOCALAPPDATA%\playwright-mcp-shared\
@@ -194,10 +239,19 @@ them automatically.
 5. Detect previous direct Playwright, fixed-profile, or pool-launcher entries.
    Those are managed predecessors. Ask before replacing `--extension`,
    `--cdp-endpoint`, another wrapper, or another deliberate custom design.
+6. Find an existing installation of this service before choosing a runtime
+   folder, read-only. On Windows, look for a current-user scheduled task whose
+   action runs `start-playwright-mcp-shared-service.ps1`; on Linux, for a user
+   unit whose `ExecStart` runs `playwright-mcp-shared.sh`. That script path
+   names the installation's runtime folder, and the task or unit is its
+   startup entry. If it differs from the defaults (or from values the human
+   gave), show the human both and ask which to keep; to keep the existing one,
+   pass its runtime folder and entry name as in "Runtime and startup-entry
+   names". Never set up a second runtime beside an existing one by default.
 
 ## 2. Select the shared profile
 
-For a fresh device, use:
+For a fresh device, use `profiles\shared` in the runtime folder, by default:
 
 `%LOCALAPPDATA%\playwright-mcp-shared\profiles\shared`
 
@@ -222,7 +276,7 @@ is never installed over the managed runtime.
 Install the package once:
 
 ```powershell
-npm install --prefix "<LOCALAPPDATA>/playwright-mcp-shared/package" `
+npm install --prefix "<RUNTIME>/package" `
   --no-audit --no-fund --save-exact @playwright/mcp@0.0.79
 ```
 
@@ -258,7 +312,9 @@ node <SKILL_DIR>/tests/test-playwright-auth-health.mjs
 ```
 
 Require both PASS results. The lease test races eight processes and requires one
-winner, protected renewal/release, and clean handoff. The health test uses local
+winner, protected renewal/release, and clean handoff, and that an installed
+copy run without `-RuntimeRoot` uses the lease of the runtime it lives in. The
+health test uses local
 fixtures to prove caller-supplied probes accept healthy state, reject generic
 identity/access failures, and never expose response content.
 
@@ -315,7 +371,21 @@ that adopts the running Node.js process, that a second launch exits quietly,
 and that the stop script stops a task-launched supervisor but never an
 unrelated process. The live checks run the pinned CLI headless in a temporary
 runtime; pass `-McpCli <path>` or set `PLAYWRIGHT_MCP_SHARED_CLI` when the
-canonical runtime does not hold it. Without a CLI they report SKIP.
+canonical runtime does not hold it. Without a CLI they report SKIP. This test
+registers and starts a disposable scheduled task.
+
+On Windows, run the task-name test:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File <SKILL_DIR>/tests/test-windows-autostart-names.ps1
+```
+
+Require its PASS result. With the scheduled-task cmdlets replaced by stubs and
+a temporary runtime, so it is safe beside a live installation, it proves a
+fresh runtime gets the default task name, a later install without `-TaskName`
+keeps the name the runtime recorded, a new name is recorded and the earlier
+task named but not removed, and an invalid name is refused.
 
 ## Launch-tab dashboard
 
@@ -626,9 +696,15 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -Port 8931 -Start
 ```
 
+Add `-TaskName "<TASK>"` only to keep or choose a task name other than the
+default, and `-RunValueName "<NAME>"` only when an earlier installation started
+from a current-user Run value under another name (see "Runtime and
+startup-entry names").
+
 Verify:
 
-- the `PlaywrightMCPSharedService` current-user scheduled task exists, starts at
+- the current-user scheduled task (`PlaywrightMCPSharedService`, or the name
+  reported as `TaskName` and recorded in the service configuration) exists, starts at
   interactive logon, has a second trigger that repeats every five minutes
   indefinitely, ignores a new instance while one runs, and has a
   failure-restart policy;
@@ -641,8 +717,8 @@ Verify:
   does not depend on the interactive shell's `PATH`; if that executable later
   moves, the launcher can rediscover a system installation or the newest local
   Codex runtime;
-- the legacy `PlaywrightMCPShared` Run value is absent after successful task
-  registration;
+- the legacy Run value (`PlaywrightMCPShared`, or the `-RunValueName` given) is
+  absent after successful task registration;
 - the task reports `Running`, no terminal window is open for it, and
   `state/shared-server.pid` names a live `powershell.exe` whose command line
   names the installed service wrapper;

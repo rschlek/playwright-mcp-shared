@@ -74,4 +74,11 @@ do not loop login or clear state speculatively.
    tenant/environment changes, or SSO recovery; release its exact lease ID in a
    `finally` path. If the lease is busy or the helper is unavailable, do not
    begin authentication. Ordinary authenticated browsing does not need the lease.
+8. A redirect is not a wall. Single sign-on and second-factor pages often pass on
+   their own using the session already in the profile. When a navigation lands
+   on an identity provider or another intermediate page, wait and re-check (up
+   to about 30 seconds) for it to settle before reporting that a sign-in needs
+   the user. Hand off only when a stable page is asking for input: a credential,
+   a code, an approval, or an identity choice. Waiting changes nothing by
+   itself; every rule above still applies before any deliberate sign-in action.
 <!-- playwright-mcp-shared:guidance end -->
